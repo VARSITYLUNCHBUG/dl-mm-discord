@@ -1,3 +1,9 @@
+## Acknowledgments
+Thank you to _bacon_ for the base build. This project started from their Bebot draft bot. Without their work made, PUGs would in rigor mortis and none of our current community would be possible.
+
+A big shout out to the ZA Deadlock community for playing in the inhouses, giving feedback and helping shape how the bot works.
+
+---
 # dl-mm-discord
 
 A Discord bot that runs a 6v6 Deadlock inhouse from queue to results: FIFO queue, ready check,
