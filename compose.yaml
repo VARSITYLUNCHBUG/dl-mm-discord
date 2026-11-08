@@ -1,0 +1,65 @@
+name: dl-mm-discord
+
+x-app: &app
+  build: .
+  image: dl-mm-discord:latest
+  env_file: .env
+  environment:
+    DATABASE_URL: postgres://draftbot:${POSTGRES_PASSWORD:-change-me}@db:5432/draftbot
+    BOT_HEARTBEAT_FILE: /tmp/bot-heartbeat
+  restart: unless-stopped
+
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: draftbot
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me}
+      POSTGRES_DB: draftbot
+    ports:
+      - "127.0.0.1:55432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U draftbot -d draftbot"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  migrate:
+    <<: *app
+    command: sh -c "python manage.py migrate --noinput && python manage.py load_presets"
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+
+  web:
+    <<: *app
+    ports:
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request as u; u.urlopen(u.Request('http://127.0.0.1:8000/healthz', headers={'Host': 'localhost'}), timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  bot:
+    <<: *app
+    command: python manage.py runbot
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "manage.py", "bot_healthcheck"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+volumes:
+  pgdata:

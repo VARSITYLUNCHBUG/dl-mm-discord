@@ -1,0 +1,48 @@
+# Seed roster: api.deadlock-api.com/v1/assets/heroes?only_active=true on 2026-11-07.
+# `id` is the Deadlock API hero ID. Never reuse one. Add new champions in Django admin or with
+# /roster sync. This file only adds champions that are missing; it never changes existing rows.
+champions:
+  - { id: 1, name: Infernus }
+  - { id: 2, name: Seven }
+  - { id: 3, name: Vindicta }
+  - { id: 4, name: Lady Geist }
+  - { id: 6, name: Abrams }
+  - { id: 7, name: Wraith }
+  - { id: 8, name: McGinnis }
+  - { id: 10, name: Paradox }
+  - { id: 11, name: Dynamo }
+  - { id: 12, name: Kelvin }
+  - { id: 13, name: Haze }
+  - { id: 14, name: Holliday }
+  - { id: 15, name: Bebop }
+  - { id: 16, name: Calico }
+  - { id: 17, name: Grey Talon }
+  - { id: 18, name: "Mo & Krill", aliases: ["mo and krill"] }
+  - { id: 19, name: Shiv }
+  - { id: 20, name: Ivy }
+  - { id: 25, name: Warden }
+  - { id: 27, name: Yamato }
+  - { id: 31, name: Lash }
+  - { id: 35, name: Viscous }
+  - { id: 50, name: Pocket }
+  - { id: 52, name: Mirage }
+  - { id: 58, name: Vyper }
+  - { id: 60, name: Sinclair }
+  - { id: 63, name: Mina }
+  - { id: 64, name: Drifter }
+  - { id: 65, name: Venator }
+  - { id: 66, name: Victor }
+  - { id: 67, name: Paige }
+  - { id: 69, name: The Doorman }
+  - { id: 72, name: Billy }
+  - { id: 76, name: Graves }
+  - { id: 77, name: Apollo }
+  - { id: 78, name: Deadman Danny }
+  - { id: 79, name: Rem }
+  - { id: 80, name: Silver }
+  - { id: 81, name: Celeste }
+  - { id: 84, name: Rat King }
+  - { id: 85, name: Solomon }
+  - { id: 86, name: Violet }
+  - { id: 87, name: Nurse Harrow, aliases: [harrow, nurse] }
+  - { id: 88, name: Baba }

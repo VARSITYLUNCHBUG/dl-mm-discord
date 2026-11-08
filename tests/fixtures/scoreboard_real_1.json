@@ -1,0 +1,170 @@
+{
+ "match_id": 131887902,
+ "match_id_truncated": false,
+ "played_at": "2026-11-05T23:01",
+ "duration_s": 2210,
+ "winner": "Hidden King",
+ "mvp": "Nevermore",
+ "key_players": [
+  "coof",
+  "Netanyahu's Cum Sock"
+ ],
+ "teams": [
+  {
+   "name": "Hidden King",
+   "souls_total": "225k",
+   "players": [
+    {
+     "name": "Nevermore",
+     "hero": "Mirage",
+     "badge": "mvp",
+     "souls": "40k",
+     "k": "12",
+     "d": "8",
+     "a": "13",
+     "player_dmg": "38k",
+     "obj_dmg": "15k",
+     "healing": "18k"
+    },
+    {
+     "name": "AiiBa",
+     "hero": "Baba",
+     "badge": null,
+     "souls": "36k",
+     "k": "7",
+     "d": "14",
+     "a": "20",
+     "player_dmg": "54k",
+     "obj_dmg": "3.4k",
+     "healing": "19k"
+    },
+    {
+     "name": "datsir",
+     "hero": "Viscous",
+     "badge": null,
+     "souls": "36k",
+     "k": "5",
+     "d": "9",
+     "a": "14",
+     "player_dmg": "47k",
+     "obj_dmg": "1.4k",
+     "healing": "14k"
+    },
+    {
+     "name": "Beef",
+     "hero": "Pocket",
+     "badge": null,
+     "souls": "39k",
+     "k": "4",
+     "d": "8",
+     "a": "20",
+     "player_dmg": "54k",
+     "obj_dmg": "5.1k",
+     "healing": "3.4k"
+    },
+    {
+     "name": "FaZe Netan",
+     "hero": "Infernus",
+     "badge": null,
+     "souls": "39k",
+     "k": "8",
+     "d": "11",
+     "a": "16",
+     "player_dmg": "31k",
+     "obj_dmg": "11k",
+     "healing": "14k"
+    },
+    {
+     "name": "bloom",
+     "hero": "Violet",
+     "badge": null,
+     "souls": "36k",
+     "k": "6",
+     "d": "11",
+     "a": "17",
+     "player_dmg": "30k",
+     "obj_dmg": "5.4k",
+     "healing": "17k"
+    }
+   ]
+  },
+  {
+   "name": "Archmother",
+   "souls_total": "239k",
+   "players": [
+    {
+     "name": "CITIGAW",
+     "hero": "Billy",
+     "badge": null,
+     "souls": "38k",
+     "k": "10",
+     "d": "7",
+     "a": "31",
+     "player_dmg": "47k",
+     "obj_dmg": "3.9k",
+     "healing": "16k"
+    },
+    {
+     "name": "coof",
+     "hero": "Deadman Danny",
+     "badge": "key",
+     "souls": "44k",
+     "k": "19",
+     "d": "5",
+     "a": "30",
+     "player_dmg": "59k",
+     "obj_dmg": "406",
+     "healing": "5.8k"
+    },
+    {
+     "name": "ARM BLANKE",
+     "hero": "Bebop",
+     "badge": null,
+     "souls": "40k",
+     "k": "9",
+     "d": "6",
+     "a": "29",
+     "player_dmg": "36k",
+     "obj_dmg": "4.6k",
+     "healing": "7.7k"
+    },
+    {
+     "name": "CORPORALCATFISH",
+     "hero": "Dynamo",
+     "badge": null,
+     "souls": "40k",
+     "k": "2",
+     "d": "5",
+     "a": "37",
+     "player_dmg": "22k",
+     "obj_dmg": "4.6k",
+     "healing": "50k"
+    },
+    {
+     "name": "Wicket",
+     "hero": "Mina",
+     "badge": null,
+     "souls": "39k",
+     "k": "3",
+     "d": "11",
+     "a": "23",
+     "player_dmg": "17k",
+     "obj_dmg": "25",
+     "healing": "8.8k"
+    },
+    {
+     "name": "Netanyahu's Cum Sock",
+     "hero": "Lash",
+     "badge": "key",
+     "souls": "38k",
+     "k": "16",
+     "d": "8",
+     "a": "30",
+     "player_dmg": "48k",
+     "obj_dmg": "2.1k",
+     "healing": "9.6k"
+    }
+   ]
+  }
+ ]
+}

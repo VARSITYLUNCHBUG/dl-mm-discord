@@ -1,0 +1,27 @@
+{
+  "match_id": null,
+  "match_id_truncated": true,
+  "played_at": "2026-11-06T23:55",
+  "duration_s": 2975,
+  "winner": "Archmother",
+  "mvp": "CITIGAW",
+  "key_players": ["Wage", "coof"],
+  "teams": [
+    {"name": "Hidden King", "souls_total": "348k", "players": [
+      {"name": "daxter", "hero": "Celeste", "badge": null, "souls": "49k", "k": "7", "d": "8", "a": "14", "player_dmg": "52k", "obj_dmg": "2.3k", "healing": "23k"},
+      {"name": "Sanchu", "hero": "Victor", "badge": null, "souls": "60k", "k": "9", "d": "3", "a": "11", "player_dmg": "28k", "obj_dmg": "2.7k", "healing": "20k"},
+      {"name": "ARM BLANKE", "hero": "Graves", "badge": null, "souls": "65k", "k": "9", "d": "9", "a": "19", "player_dmg": "59k", "obj_dmg": "5.5k", "healing": "26k"},
+      {"name": "Sp1ce", "hero": "Bebop", "badge": null, "souls": "52k", "k": "1", "d": "11", "a": "19", "player_dmg": "33k", "obj_dmg": "1.2k", "healing": "13k"},
+      {"name": "Wage", "hero": "Calico", "badge": "key", "souls": "71k", "k": "21", "d": "5", "a": "13", "player_dmg": "93k", "obj_dmg": "18k", "healing": "23k"},
+      {"name": "FaZe Netan", "hero": "Lash", "badge": null, "souls": "50k", "k": "1", "d": "16", "a": "12", "player_dmg": "26k", "obj_dmg": "2.5k", "healing": "2.1k"}
+    ]},
+    {"name": "Archmother", "souls_total": "356k", "players": [
+      {"name": "manofterra", "hero": "Venator", "badge": null, "souls": "59k", "k": "8", "d": "8", "a": "19", "player_dmg": "46k", "obj_dmg": "2.9k", "healing": "11k"},
+      {"name": "ArtNoodle", "hero": "McGinnis", "badge": null, "souls": "51k", "k": "0", "d": "7", "a": "14", "player_dmg": "22k", "obj_dmg": "4", "healing": "13k"},
+      {"name": "coof", "hero": "Holliday", "badge": "key", "souls": "69k", "k": "15", "d": "7", "a": "21", "player_dmg": "61k", "obj_dmg": "2.9k", "healing": "6.2k"},
+      {"name": "CITIGAW", "hero": "Warden", "badge": "mvp", "souls": "66k", "k": "23", "d": "6", "a": "20", "player_dmg": "113k", "obj_dmg": "26k", "healing": "42k"},
+      {"name": "datsir", "hero": "Paradox", "badge": null, "souls": "55k", "k": "5", "d": "11", "a": "21", "player_dmg": "53k", "obj_dmg": "12k", "healing": "10k"},
+      {"name": "Talos", "hero": "Rat King", "badge": null, "souls": "56k", "k": "1", "d": "9", "a": "25", "player_dmg": "22k", "obj_dmg": "16k", "healing": "9.6k"}
+    ]}
+  ]
+}

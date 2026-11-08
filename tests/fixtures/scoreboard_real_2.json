@@ -1,0 +1,170 @@
+{
+ "match_id": 130605666,
+ "match_id_truncated": false,
+ "played_at": "2026-11-03T20:20",
+ "duration_s": 1523,
+ "winner": "Archmother",
+ "mvp": "Nevermore",
+ "key_players": [
+  "SHREKENATOR",
+  "Wage"
+ ],
+ "teams": [
+  {
+   "name": "Hidden King",
+   "souls_total": "131k",
+   "players": [
+    {
+     "name": "ArtNoodle",
+     "hero": "Rem",
+     "badge": null,
+     "souls": "16k",
+     "k": "0",
+     "d": "8",
+     "a": "5",
+     "player_dmg": "3.0k",
+     "obj_dmg": "0",
+     "healing": "4.1k"
+    },
+    {
+     "name": "datsir",
+     "hero": "Wraith",
+     "badge": null,
+     "souls": "25k",
+     "k": "1",
+     "d": "10",
+     "a": "12",
+     "player_dmg": "23k",
+     "obj_dmg": "3.3k",
+     "healing": "5.2k"
+    },
+    {
+     "name": "SHREKENATOR",
+     "hero": "Pocket",
+     "badge": "key",
+     "souls": "23k",
+     "k": "9",
+     "d": "7",
+     "a": "5",
+     "player_dmg": "31k",
+     "obj_dmg": "1.8k",
+     "healing": "3.3k"
+    },
+    {
+     "name": "CITIGAW",
+     "hero": "Billy",
+     "badge": null,
+     "souls": "28k",
+     "k": "7",
+     "d": "7",
+     "a": "6",
+     "player_dmg": "24k",
+     "obj_dmg": "875",
+     "healing": "7.9k"
+    },
+    {
+     "name": "chr2stiaano",
+     "hero": "Paradox",
+     "badge": null,
+     "souls": "17k",
+     "k": "0",
+     "d": "9",
+     "a": "4",
+     "player_dmg": "10k",
+     "obj_dmg": "1.1k",
+     "healing": "1.7k"
+    },
+    {
+     "name": "BONK!?",
+     "hero": "Calico",
+     "badge": null,
+     "souls": "23k",
+     "k": "6",
+     "d": "9",
+     "a": "6",
+     "player_dmg": "24k",
+     "obj_dmg": "3.0k",
+     "healing": "5.6k"
+    }
+   ]
+  },
+  {
+   "name": "Archmother",
+   "souls_total": "",
+   "players": [
+    {
+     "name": "SNΞK",
+     "hero": "Venator",
+     "badge": null,
+     "souls": "34k",
+     "k": "6",
+     "d": "3",
+     "a": "14",
+     "player_dmg": "18k",
+     "obj_dmg": "19k",
+     "healing": "4.0k"
+    },
+    {
+     "name": "Wage",
+     "hero": "Baba",
+     "badge": "key",
+     "souls": "33k",
+     "k": "5",
+     "d": "2",
+     "a": "24",
+     "player_dmg": "32k",
+     "obj_dmg": "8.0k",
+     "healing": "16k"
+    },
+    {
+     "name": "Nevermore",
+     "hero": "Violet",
+     "badge": "mvp",
+     "souls": "39k",
+     "k": "22",
+     "d": "4",
+     "a": "16",
+     "player_dmg": "41k",
+     "obj_dmg": "8.5k",
+     "healing": "15k"
+    },
+    {
+     "name": "Gauntlerr",
+     "hero": "Shiv",
+     "badge": null,
+     "souls": "30k",
+     "k": "7",
+     "d": "3",
+     "a": "19",
+     "player_dmg": "26k",
+     "obj_dmg": "6.4k",
+     "healing": "2.8k"
+    },
+    {
+     "name": "Fent",
+     "hero": "Lash",
+     "badge": null,
+     "souls": "26k",
+     "k": "6",
+     "d": "5",
+     "a": "15",
+     "player_dmg": "24k",
+     "obj_dmg": "7.1k",
+     "healing": "8.2k"
+    },
+    {
+     "name": "Heavy",
+     "hero": "Drifter",
+     "badge": null,
+     "souls": "24k",
+     "k": "4",
+     "d": "6",
+     "a": "19",
+     "player_dmg": "9.4k",
+     "obj_dmg": "6.2k",
+     "healing": "8.8k"
+    }
+   ]
+  }
+ ]
+}

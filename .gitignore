@@ -1,0 +1,19 @@
+# Environment files: everything except the template.
+.env*
+!.env.example
+*.env
+
+# Python and tooling caches
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+
+# Build and runtime output
+staticfiles/
+.bot-heartbeat
+postmatch_screens/
+scoreocr_out/

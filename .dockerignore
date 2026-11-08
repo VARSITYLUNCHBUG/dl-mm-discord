@@ -1,0 +1,25 @@
+.env
+.git
+.venv
+.hypothesis
+.mypy_cache
+.pytest_cache
+.ruff_cache
+__pycache__
+research_notes
+reports
+staticfiles
+tests
+scoreocr/
+tests/fixtures/scoreboard_sample.*
+
+# Local env copies: never baked into images or committed.
+*.env
+postmatch_screens/
+scoreocr_out/
+
+# Every env file except the template, plus local runtime files.
+.env*
+!.env.example
+.bot-heartbeat
+scoreocr_out/

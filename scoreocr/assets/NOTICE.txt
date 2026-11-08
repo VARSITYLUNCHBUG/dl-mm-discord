@@ -1,0 +1,6 @@
+ch_PP-OCRv4_rec_infer.onnx: PP-OCRv4 mobile text recognition model from PaddleOCR, converted to
+ONNX. Taken unmodified from the rapidocr-onnxruntime 1.4.4 wheel on PyPI (Apache-2.0).
+SHA-256: 48fc40f24f6d2a207a2b1091d3437eb3cc3eb6b676dc3ef9c37384005483683b
+
+glyphs.npz and icons.npz: built from tests/fixtures/scoreboard_sample.webp by
+python -m scoreocr.build_templates
