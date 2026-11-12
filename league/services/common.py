@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
+from django.db import transaction
 from django.db.models import QuerySet
 from django.utils import timezone
 
@@ -150,12 +151,29 @@ def add_effect(
 
 
 def request_render(community: Community, kind: str, match: Match | None = None) -> None:
-    """Ask for a re-render. Renders read the latest state, so pending ones coalesce into one."""
-    pending = OutboxEffect.objects.filter(
-        community=community, kind=kind, match=match, status=EffectStatus.PENDING, attempts=0
-    )
-    if not pending.exists():
-        add_effect(community, kind, match=match)
+    """Ask for a re-render. Renders read the latest state, so ones not yet started coalesce.
+
+    One the worker has started may have read the state before this change, so it doesn't count.
+    The row lock makes the worker's claim wait for this transaction, so either the claim comes
+    first and a new render is added, or the render starts after this change has committed.
+    A row another request holds is skipped rather than waited on: an extra render is harmless,
+    and requests never queue behind each other's locks.
+    """
+    with transaction.atomic():
+        unstarted = (
+            OutboxEffect.objects.select_for_update(skip_locked=True)
+            .filter(
+                community=community,
+                kind=kind,
+                match=match,
+                status=EffectStatus.PENDING,
+                attempts=0,
+                started_at__isnull=True,
+            )
+            .first()
+        )
+        if unstarted is None:
+            add_effect(community, kind, match=match)
 
 
 def clear_notices(match: Match) -> None:

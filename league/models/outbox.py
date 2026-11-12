@@ -31,6 +31,8 @@ class OutboxEffect(models.Model):
     )
     attempts = models.PositiveSmallIntegerField(default=0)
     run_after = models.DateTimeField()
+    # Set when the worker begins a run, so a render requested after that gets one of its own.
+    started_at = models.DateTimeField(null=True, blank=True)
     last_error = models.TextField(blank=True)
     created_at = models.DateTimeField()
     done_at = models.DateTimeField(null=True, blank=True)

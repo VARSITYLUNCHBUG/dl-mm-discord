@@ -1015,6 +1015,36 @@ def test_queue_message_is_created_once_then_edited(wired: Community) -> None:
 
 
 @pytest.mark.django_db(transaction=True)
+def test_a_join_while_the_queue_renders_gets_a_render_of_its_own(
+    wired: Community, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A render reads the queue before it edits Discord, so a join in between needs another."""
+    gateway = FakeGateway()
+    first, second = make_player(1), make_player(2)
+    queue.join(wired.pk, first)
+    read_queue = boards.queue_view
+
+    def join_after_the_read(row: Community) -> boards.QueueView:
+        view = read_queue(row)
+        if view.size == 1:
+            queue.join(wired.pk, second)
+        return view
+
+    monkeypatch.setattr(boards, "queue_view", join_after_the_read)
+    drain(gateway)
+    wired.refresh_from_db()
+    assert "2/12" in str(gateway.views[wired.queue_message_id].to_components())
+    assert OutboxEffect.objects.filter(kind="render_queue", status=EffectStatus.DONE).count() == 2
+
+
+@pytest.mark.django_db(transaction=True)
+def test_a_render_requested_before_one_starts_still_coalesces(wired: Community) -> None:
+    request_queue(wired)
+    request_queue(wired)
+    assert OutboxEffect.objects.filter(kind="render_queue").count() == 1
+
+
+@pytest.mark.django_db(transaction=True)
 def test_unknown_effect_fails_without_stopping_others(wired: Community) -> None:
     gateway = FakeGateway()
     add_effect(wired, "does_not_exist")

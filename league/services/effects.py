@@ -53,6 +53,18 @@ def due_by_match(limit: int = 200) -> list[list[OutboxEffect]]:
     return list(groups.values())
 
 
+def mark_started(effect_id: int) -> bool:
+    """Claim an effect before running it. False if it's no longer pending, so it shouldn't run.
+
+    A render that has started has already read its state, so requests from now on stop
+    coalescing into it (see `request_render`).
+    """
+    claimed = OutboxEffect.objects.filter(pk=effect_id, status=EffectStatus.PENDING).update(
+        started_at=now()
+    )
+    return claimed > 0
+
+
 def mark_done(effect_id: int, status: str = EffectStatus.DONE) -> None:
     OutboxEffect.objects.filter(pk=effect_id).update(status=status, done_at=now(), last_error="")
 
