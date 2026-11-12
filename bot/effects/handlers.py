@@ -11,7 +11,7 @@ from bot.db import db
 from bot.effects.gateway import ChannelGone, Gateway
 from bot.renderers.board import (
     render_board,
-    render_picker,
+    render_pickers,
     render_ready_dm,
     render_sub_offer_dm,
     render_voice_dm,
@@ -313,6 +313,18 @@ async def remove_player(env: Env) -> None:
 # --- Boards ----------------------------------------------------------------------------------
 
 
+# The champion grid's messages, top to bottom. They sit directly below the board.
+GRID_KINDS = (ResourceKind.PICKER_MESSAGE, ResourceKind.PICKER_MESSAGE_2)
+
+
+def _last_message(resources: dict[str, int]) -> int | None:
+    """The bottom of the flow: the last grid message, or the board when there is no grid."""
+    for kind in reversed(GRID_KINDS):
+        if kind in resources:
+            return resources[kind]
+    return resources.get(ResourceKind.BOARD_MESSAGE)
+
+
 async def _render_board(env: Env) -> None:
     resources = await db(effects.resources, env.match_id)
     text_id = resources.get(ResourceKind.TEXT)
@@ -320,46 +332,47 @@ async def _render_board(env: Env) -> None:
         raise Skip("Lobby channel isn't up yet; creating it renders the board.")
     state = await db(boards.board_state, env.match_id)
     board = render_board(state)
-    picker = render_picker(state)
+    grid = render_pickers(state)
     board_id = resources.get(ResourceKind.BOARD_MESSAGE)
-    picker_id = resources.get(ResourceKind.PICKER_MESSAGE)
-    if board_id is not None and await env.gateway.latest_message_id(text_id) == (
-        picker_id or board_id
+    in_place = False
+    if board_id is not None and await env.gateway.latest_message_id(text_id) == _last_message(
+        resources
     ):
         try:
             await env.gateway.edit_view(text_id, board_id, board)
         except ChannelGone:
             logger.info("The board was deleted; posting it again", extra={"match": env.match_id})
         else:
-            await _settle_picker(env, text_id, picker_id, picker)
-            return
-    # Post before deleting, so the flow is never missing. Old buttons stay safe in between: they
-    # carry their step, and a stale click gets a polite refusal. Each old message goes as soon as
-    # its replacement is recorded, so a retry can't leave one behind.
-    message_id = await env.gateway.send_view(text_id, board)
-    await db(effects.record_resource, env.match_id, ResourceKind.BOARD_MESSAGE, message_id)
-    if board_id is not None:
-        await env.gateway.delete_message(text_id, board_id)
-    if picker is not None:
-        new_picker = await env.gateway.send_view(text_id, picker)
-        await db(effects.record_resource, env.match_id, ResourceKind.PICKER_MESSAGE, new_picker)
-        if picker_id is not None:
-            await env.gateway.delete_message(text_id, picker_id)
-    else:
-        await _settle_picker(env, text_id, picker_id, None)
-    await db(effects.cancel_board_moves, env.match_id)  # Chat now starts counting afresh.
+            in_place = True
+    if not in_place:
+        # Post before deleting, so the flow is never missing. Old buttons stay safe in between:
+        # they carry their step, and a stale click gets a polite refusal. Each old message goes
+        # as soon as its replacement is recorded, so a retry can't leave one behind.
+        message_id = await env.gateway.send_view(text_id, board)
+        await db(effects.record_resource, env.match_id, ResourceKind.BOARD_MESSAGE, message_id)
+        if board_id is not None:
+            await env.gateway.delete_message(text_id, board_id)
+    await _repost_grid(env, text_id, resources, grid)
+    if not in_place:
+        await db(effects.cancel_board_moves, env.match_id)  # Chat now starts counting afresh.
 
 
-async def _settle_picker(env: Env, text_id: int, picker_id: int | None, picker: Any) -> None:
-    """Bring the picker message in line with the board, which is already in place above it."""
-    if picker is not None and picker_id is not None:
-        await env.gateway.edit_view(text_id, picker_id, picker)
-    elif picker is not None:
-        message_id = await env.gateway.send_view(text_id, picker)
-        await db(effects.record_resource, env.match_id, ResourceKind.PICKER_MESSAGE, message_id)
-    elif picker_id is not None:
-        await env.gateway.delete_message(text_id, picker_id)
-        await db(effects.mark_resource_deleted, env.match_id, ResourceKind.PICKER_MESSAGE)
+async def _repost_grid(env: Env, text_id: int, resources: dict[str, int], grid: list[Any]) -> None:
+    """Post the champion grid afresh below the board, then remove the old one.
+
+    The grid is never edited: an edited message gets an "(edited)" tag, which would split it.
+    Each old message goes as soon as its replacement is recorded, so a retry can't leave one
+    behind, and the new messages end up in order directly below the board.
+    """
+    for index, kind in enumerate(GRID_KINDS):
+        old_id = resources.get(kind)
+        if index < len(grid):
+            message_id = await env.gateway.send_view(text_id, grid[index])
+            await db(effects.record_resource, env.match_id, kind, message_id)
+        elif old_id is not None:
+            await db(effects.mark_resource_deleted, env.match_id, kind)
+        if old_id is not None:
+            await env.gateway.delete_message(text_id, old_id)
 
 
 @effect("render_board")
@@ -374,9 +387,7 @@ async def move_board(env: Env) -> None:
     text_id = resources.get(ResourceKind.TEXT)
     if text_id is None:
         raise Skip("The channel has closed.")
-    last_id = resources.get(ResourceKind.PICKER_MESSAGE) or resources.get(
-        ResourceKind.BOARD_MESSAGE
-    )
+    last_id = _last_message(resources)
     if last_id is not None and await env.gateway.latest_message_id(text_id) == last_id:
         raise Skip("The board is already last.")
     await _render_board(env)

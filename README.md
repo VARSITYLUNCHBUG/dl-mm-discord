@@ -110,9 +110,10 @@ Players can chat freely, and the board stays at the bottom:
   captain a wrong ban, so it doesn't move on every message. Change this with the `BOARD_MOVE_*`
   values in `league/services/effects.py`.
 - **Choices are buttons**, so everything is visible at once. Drafted players and taken champions
-  stay in place, greyed out, so nothing shifts under a click. The champion grid takes 25 buttons on
-  the board and up to 30 in a second message below it, because Discord allows 40 components per
-  message. A roster above 55 falls back to dropdowns.
+  stay in place, greyed out, so nothing shifts under a click. The champion grid has messages of
+  its own directly below the board, split evenly over two because Discord allows 40 components per
+  message, with Random at the end. They are posted afresh each turn rather than edited, so no
+  "(edited)" tag splits the grid. A roster above 55 falls back to dropdowns.
 
 The bot only learns that a message was sent. It doesn't have the Message Content intent, so it
 can't read chat.

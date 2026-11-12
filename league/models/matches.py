@@ -121,7 +121,8 @@ class ResourceKind(models.TextChoices):
     TEAM_A_VOICE = "team_a_voice", "Team A voice channel"
     TEAM_B_VOICE = "team_b_voice", "Team B voice channel"
     BOARD_MESSAGE = "board_message", "Board message"
-    PICKER_MESSAGE = "picker_message", "Champion picker message"
+    PICKER_MESSAGE = "picker_message", "Champion grid message"
+    PICKER_MESSAGE_2 = "picker_message_2", "Champion grid message, second half"
     RESULTS_MESSAGE = "results_message", "Results message"
     NOTICE = "notice", "Notice message"
 

@@ -23,7 +23,7 @@ from bot.handlers import queue as _queue  # noqa: F401
 from bot.handlers import results as _results  # noqa: F401
 from bot.handlers.results import parse_deadlock_match_id
 from bot.images import detect_image
-from bot.renderers.board import render_board, render_picker, render_ready_dm
+from bot.renderers.board import render_board, render_pickers, render_ready_dm
 from bot.renderers.queue import render_queue
 from bot.renderers.results import render_results, team_table
 from bot.routing import (
@@ -165,10 +165,7 @@ def test_every_phase_renders_within_discord_limits(popped: Match) -> None:
     def check(match: Match) -> None:
         state = boards.board_state(match.pk)
         seen.add(state.status)
-        views = [render_board(state)]
-        picker = render_picker(state)
-        if picker is not None:
-            views.append(picker)
+        views = [render_board(state), *render_pickers(state)]
         for view in views:
             assert_within_limits(view)
             text = str(view.to_components())
@@ -228,23 +225,27 @@ def draft_buttons(view: discord.ui.LayoutView) -> list[dict[str, Any]]:
 
 
 def grid_buttons(state: boards.BoardState) -> list[dict[str, Any]]:
-    picker = render_picker(state)
-    rest = draft_buttons(picker) if picker is not None else []
-    return draft_buttons(render_board(state)) + rest
+    return [button for view in render_pickers(state) for button in draft_buttons(view)]
 
 
 @pytest.mark.django_db
-def test_champion_grid_shows_all_44_across_the_board_and_a_picker(popped: Match) -> None:
+def test_champion_grid_has_messages_of_its_own_below_the_board(popped: Match) -> None:
     match = to_champion_draft(popped)
     state = boards.board_state(match.pk)
     assert len(state.champions) == 44
-    board_view = render_board(state)
-    picker = render_picker(state)
-    assert picker is not None
-    assert len(draft_buttons(board_view)) == 25
-    assert len(draft_buttons(picker)) == 19
-    assert [b["label"] for b in all_buttons(picker.to_components())][-1] == "Random"
-    assert not all_selects(board_view.to_components())
+    # The board is the box alone: the draft so far and Request a sub, no champions.
+    components = render_board(state).to_components()
+    assert [component["type"] for component in components] == [17]
+    assert "choose_champion" not in str(components)
+    assert "sub_open" in str(all_custom_ids(components))
+    # The grid is two messages of nothing but rows, so they stack into one grid.
+    first, second = render_pickers(state)
+    for view in (first, second):
+        assert_within_limits(view)
+        assert {component["type"] for component in view.to_components()} == {1}
+    assert len(draft_buttons(first)) == 25
+    assert len(draft_buttons(second)) == 19
+    assert [b["label"] for b in all_buttons(second.to_components())][-1] == "Random"
     labels = [button["label"] for button in grid_buttons(state)]
     assert labels == sorted(labels)  # Alphabetical across both messages.
 
@@ -335,10 +336,11 @@ def test_oversized_roster_falls_back_to_dropdowns() -> None:
         players=[],
         champions=[ChampionOption(i, f"Champion {i}") for i in range(120)],
     )
-    view = render_board(state)
-    assert_within_limits(view)
-    assert render_picker(state) is None
-    assert sum(len(select["options"]) for select in all_selects(view.to_components())) == 120
+    assert_within_limits(render_board(state))
+    (picker,) = render_pickers(state)
+    assert_within_limits(picker)
+    assert sum(len(select["options"]) for select in all_selects(picker.to_components())) == 120
+    assert "random_champion" in str(picker.to_components())
 
 
 def test_largest_grid_that_fits_stays_within_limits() -> None:
@@ -354,10 +356,11 @@ def test_largest_grid_that_fits_stays_within_limits() -> None:
         players=[],
         champions=[ChampionOption(i, f"Champion {i}") for i in range(55)],
     )
-    picker = render_picker(state)
-    assert picker is not None
+    pickers = render_pickers(state)
+    assert len(pickers) == 2
     assert_within_limits(render_board(state))
-    assert_within_limits(picker)
+    for picker in pickers:
+        assert_within_limits(picker)
     assert len(grid_buttons(state)) == 55
 
 
@@ -606,6 +609,7 @@ class FakeGateway:
     dms: list[tuple[int, discord.ui.LayoutView]] = field(default_factory=list)
     texts: list[tuple[int, str, list[int]]] = field(default_factory=list)
     views: dict[int, Any] = field(default_factory=dict)
+    edited: set[int] = field(default_factory=set)  # Messages edited in place.
     posted_files: list[tuple[int, tuple[str, bytes] | None]] = field(default_factory=list)
     statuses: dict[int, str] = field(default_factory=dict)
     granted: list[tuple[int, int]] = field(default_factory=list)
@@ -680,6 +684,7 @@ class FakeGateway:
         if message_id not in self.messages.get(channel_id, []):
             raise ChannelGone(str(message_id))
         self.views[message_id] = view
+        self.edited.add(message_id)
 
     async def send_text(
         self, channel_id, text, *, user_ids: Iterable[int] = (), role_id=None
@@ -1072,13 +1077,15 @@ def live_notice_texts(gateway: FakeGateway, match: Match) -> list[str]:
 
 
 def assert_board_last(gateway: FakeGateway, match: Match) -> None:
-    """The flow is at the bottom: the board, then the picker when the champion grid needs one."""
+    """The flow is at the bottom: the board, then the champion grid's messages in order."""
     order = channel_order(gateway, match)
-    picker = effects.resource_id(match.pk, ResourceKind.PICKER_MESSAGE)
-    if picker is None:
-        assert order[-1] == resource(match, ResourceKind.BOARD_MESSAGE)
-    else:
-        assert order[-2:] == [resource(match, ResourceKind.BOARD_MESSAGE), picker]
+    grid = [
+        message_id
+        for kind in (ResourceKind.PICKER_MESSAGE, ResourceKind.PICKER_MESSAGE_2)
+        if (message_id := effects.resource_id(match.pk, kind)) is not None
+    ]
+    expected = [resource(match, ResourceKind.BOARD_MESSAGE), *grid]
+    assert order[-len(expected) :] == expected
 
 
 def popped_match(wired: Community, gateway: FakeGateway) -> Match:
@@ -1240,25 +1247,36 @@ def test_chat_from_before_a_move_no_longer_counts(wired: Community) -> None:
 
 
 @pytest.mark.django_db(transaction=True)
-def test_champion_picker_follows_the_board_and_goes_when_the_draft_ends(wired: Community) -> None:
+def test_champion_grid_follows_the_board_and_goes_when_the_draft_ends(wired: Community) -> None:
     gateway = FakeGateway()
     match = to_champion_draft(popped_match(wired, gateway))
     drain(gateway)
     board = resource(match, ResourceKind.BOARD_MESSAGE)
     picker = resource(match, ResourceKind.PICKER_MESSAGE)
+    picker_2 = resource(match, ResourceKind.PICKER_MESSAGE_2)
     assert_board_last(gateway, match)
 
-    # A step with no chat below edits both messages in place.
+    # A step with no chat below edits the board in place, and posts the grid afresh: an edited
+    # grid message would carry an "(edited)" tag that splits the grid.
     step = build_plan(mode_of(match))[match.step_index]
     captain = captain_of(match, team_for_role(step.role, match.champion_first_pick)).player
-    champion = boards.board_state(match.pk).champions[-1].id  # Alphabetically last: on the picker.
+    champion = boards.board_state(match.pk).champions[-1].id  # Alphabetically last.
     draft_service.choose_champion(match.pk, captain, match.step_index, champion)
     drain(gateway)
     assert resource(match, ResourceKind.BOARD_MESSAGE) == board
-    assert resource(match, ResourceKind.PICKER_MESSAGE) == picker
+    assert board in gateway.edited
+    new_grid = [
+        resource(match, kind)
+        for kind in (ResourceKind.PICKER_MESSAGE, ResourceKind.PICKER_MESSAGE_2)
+    ]
+    assert picker not in new_grid and picker_2 not in new_grid
+    assert not set(new_grid) & gateway.edited
+    assert {picker, picker_2}.isdisjoint(channel_order(gateway, fresh(match)))
+    assert_board_last(gateway, match)
     assert any(
-        button.get("disabled") for button in all_buttons(gateway.views[picker].to_components())
+        button.get("disabled") for button in all_buttons(gateway.views[new_grid[1]].to_components())
     )
+    picker = new_grid[0]
 
     # Chat below moves both, leaving one of each.
     text_id = resource(match, ResourceKind.TEXT)
@@ -1270,12 +1288,12 @@ def test_champion_picker_follows_the_board_and_goes_when_the_draft_ends(wired: C
     assert picker not in order
     assert set(chat) <= set(order)
 
-    # Once the draft ends, the picker goes and the board is last again.
+    # Once the draft ends, the grid goes and the board is last again.
     match = run_champion_draft(match)
     drain(gateway)
     assert effects.resource_id(match.pk, ResourceKind.PICKER_MESSAGE) is None
+    assert effects.resource_id(match.pk, ResourceKind.PICKER_MESSAGE_2) is None
     assert_board_last(gateway, match)
-    assert not effects.resource_id(match.pk, ResourceKind.PICKER_MESSAGE)
     assert not OutboxEffect.objects.filter(status=EffectStatus.FAILED).exists()
 
 
@@ -1434,7 +1452,7 @@ def test_paused_board_drops_the_grid_and_fits_with_two_sub_requests(popped: Matc
     assert "choose_champion" not in ids
     assert {"sub_approve", "sub_reject", "sub_invite_open", "sub_queue", "sub_cancel"} <= set(ids)
     assert all(action in registered_actions() for action in ids)
-    assert render_picker(state) is None
+    assert render_pickers(state) == []
     assert "Paused for a sub" in str(view.to_components())
 
 
@@ -1600,11 +1618,7 @@ def test_board_fits_with_the_most_sub_requests_allowed(popped: Match, phase: str
 
 def _views(match: Match) -> list[Any]:
     state = boards.board_state(match.pk)
-    views = [render_board(state)]
-    picker = render_picker(state)
-    if picker is not None:
-        views.append(picker)
-    return views
+    return [render_board(state), *render_pickers(state)]
 
 
 def _check(match: Match) -> list[dict[str, Any]]:

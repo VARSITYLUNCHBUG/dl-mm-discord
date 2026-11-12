@@ -155,7 +155,7 @@ class Migration(migrations.Migration):
             name='MatchResource',
             fields=[
                 ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
-                ('kind', models.CharField(choices=[('text', 'Lobby text channel'), ('lobby_voice', 'Lobby voice channel'), ('team_a_voice', 'Team A voice channel'), ('team_b_voice', 'Team B voice channel'), ('board_message', 'Board message'), ('picker_message', 'Champion picker message'), ('results_message', 'Results message'), ('notice', 'Notice message')], max_length=16)),
+                ('kind', models.CharField(choices=[('text', 'Lobby text channel'), ('lobby_voice', 'Lobby voice channel'), ('team_a_voice', 'Team A voice channel'), ('team_b_voice', 'Team B voice channel'), ('board_message', 'Board message'), ('picker_message', 'Champion grid message'), ('picker_message_2', 'Champion grid message, second half'), ('results_message', 'Results message'), ('notice', 'Notice message')], max_length=16)),
                 ('discord_id', models.BigIntegerField()),
                 ('created_at', models.DateTimeField(auto_now_add=True)),
                 ('deleted_at', models.DateTimeField(blank=True, null=True)),

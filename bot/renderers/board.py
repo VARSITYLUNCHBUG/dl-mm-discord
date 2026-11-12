@@ -19,10 +19,11 @@ from league.services.subs import OfferInfo
 # Discord caps a string select at 25 options, and an action row at 5 buttons.
 SELECT_LIMIT = 25
 BUTTONS_PER_ROW = 5
-# A message holds 40 components, counting each row and button. The board's other items leave room
-# for 5 full rows, and a message of nothing but rows holds 6. A bigger roster falls back to selects.
-BOARD_GRID_SIZE = 25
-PICKER_GRID_SIZE = 30
+# A message holds 40 components, counting each row and button, so a message of nothing but rows
+# holds 6 full rows. The champion grid gets up to two such messages of its own below the board; a
+# bigger roster falls back to selects.
+ROWS_PER_GRID_MESSAGE = 6
+GRID_MESSAGES = 2
 ACCENT_LIVE = 0x5865F2
 ACCENT_ATTENTION = 0xFEE75C
 ACCENT_DONE = 0x57F287
@@ -259,31 +260,27 @@ def _champion_rows(state: BoardState, champions: list[ChampionOption]) -> list[A
     ]
 
 
-def _grid_fits(state: BoardState) -> bool:
-    return len(state.champions) <= BOARD_GRID_SIZE + PICKER_GRID_SIZE
-
-
-def _champion_selects(state: BoardState, box: Container[Any]) -> None:
+def _champion_selects(state: BoardState) -> list[ActionRow[Any]]:
     """Only for a roster too big for the grid: dropdowns take far fewer components."""
     placeholder = "Ban" if state.step_action == "ban" else "Pick"
     options = [
         SelectOption(label=c.name[:100], value=str(c.id), emoji=_champion_emoji(c))
         for c in state.available_champions
     ]
-    for index, chunk in enumerate(_chunks(options)):
-        box.add_item(
-            ActionRow(
-                RouteSelect(
-                    "pick_champion",
-                    state.match_id,
-                    f"{state.step_index}.{index}",
-                    options=chunk,
-                    placeholder=f"{placeholder} a champion: {chunk[0].label} to {chunk[-1].label}"[
-                        :150
-                    ],
-                )
+    return [
+        ActionRow(
+            RouteSelect(
+                "pick_champion",
+                state.match_id,
+                f"{state.step_index}.{index}",
+                options=chunk,
+                placeholder=f"{placeholder} a champion: {chunk[0].label} to {chunk[-1].label}"[
+                    :150
+                ],
             )
         )
+        for index, chunk in enumerate(_chunks(options))
+    ]
 
 
 def _champion_draft(state: BoardState, box: Container[Any]) -> None:
@@ -301,13 +298,6 @@ def _champion_draft(state: BoardState, box: Container[Any]) -> None:
     box.add_item(
         TextDisplay(f"**{state.acting_captain_name}** is {verb}{progress}.{_next_up(state)}")
     )
-    if not _grid_fits(state):
-        _champion_selects(state, box)
-    else:
-        for row in _champion_rows(state, state.champions[:BOARD_GRID_SIZE]):
-            box.add_item(row)
-    if not _has_picker(state):
-        box.add_item(ActionRow(_random_button(state)))
 
 
 def _random_button(state: BoardState) -> RouteButton:
@@ -321,22 +311,26 @@ def _random_button(state: BoardState) -> RouteButton:
     )
 
 
-def _has_picker(state: BoardState) -> bool:
-    return _grid_fits(state) and len(state.champions) > BOARD_GRID_SIZE
+def render_pickers(state: BoardState) -> list[LayoutView]:
+    """The champion grid, in messages of its own directly below the board.
 
-
-def render_picker(state: BoardState) -> LayoutView | None:
-    """The rest of the champion grid, in a second message directly below the board.
-
-    The Random button sits here too: the board has no components to spare.
+    They hold nothing else, so they stack into one grid. Each turn they are posted afresh rather
+    than edited, so no "(edited)" tag splits the grid.
     """
-    if state.status != Status.CHAMPION_DRAFT or not _has_picker(state) or state.on_hold:
-        return None
-    view = LayoutView(timeout=None)
-    for row in _champion_rows(state, state.champions[BOARD_GRID_SIZE:]):
-        view.add_item(row)
-    view.add_item(ActionRow(_random_button(state)))
-    return view
+    if state.status != Status.CHAMPION_DRAFT or state.on_hold:
+        return []
+    rows = [*_champion_rows(state, state.champions), ActionRow(_random_button(state))]
+    if len(rows) > ROWS_PER_GRID_MESSAGE * GRID_MESSAGES:
+        rows = [*_champion_selects(state), ActionRow(_random_button(state))]
+    messages = -(-len(rows) // ROWS_PER_GRID_MESSAGE)
+    per_message = -(-len(rows) // messages)  # Balanced, so neither half looks like an afterthought.
+    views = []
+    for start in range(0, len(rows), per_message):
+        view = LayoutView(timeout=None)
+        for row in rows[start : start + per_message]:
+            view.add_item(row)
+        views.append(view)
+    return views
 
 
 def _final_draft_summary(state: BoardState) -> str:
