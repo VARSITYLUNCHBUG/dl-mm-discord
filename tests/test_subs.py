@@ -8,6 +8,7 @@ from league.domain.draft_plan import build_plan, team_for_role
 from league.domain.engine import Status
 from league.domain.errors import InvalidAction, NotAllowed, StaleAction
 from league.models import (
+    CaptainVote,
     Community,
     Match,
     OutboxEffect,
@@ -27,10 +28,11 @@ from tests.helpers import (
     finish,
     fresh,
     image,
-    keep_captains,
     ready_all,
     run_player_draft,
+    to_champion_draft,
     to_in_progress,
+    vote_captains,
 )
 
 pytestmark = pytest.mark.django_db
@@ -53,7 +55,7 @@ def queue_up(community: Community, numbers: range) -> list[Player]:
 
 
 def in_draft(popped: Match) -> Match:
-    return keep_captains(ready_all(popped))
+    return vote_captains(ready_all(popped))
 
 
 def non_captain(match: Match, team: str = "") -> Player:
@@ -344,7 +346,7 @@ def test_late_answer_after_the_slot_closed_is_stale(popped: Match, players: list
 
 
 def test_timer_resumes_where_it_stopped(popped: Match, players: list[Player], clock: Clock) -> None:
-    match = run_player_draft(in_draft(popped))  # Champion draft: 30 seconds a step.
+    match = to_champion_draft(popped)  # Champion draft: 40 seconds a step.
     clock.advance(10)
     leaving = non_captain(match, "A")
     request = self_sub(match, leaving)
@@ -354,7 +356,7 @@ def test_timer_resumes_where_it_stopped(popped: Match, players: list[Player], cl
     sub = make_player(77)
     subs.answer_offer(invite(request, leaving, sub).pk, sub, True)
     left = (fresh(match).deadline_at - clock.now()).total_seconds()
-    assert 18 <= left <= 21
+    assert 28 <= left <= 31
 
 
 def test_paused_draft_refuses_picks(popped: Match) -> None:
@@ -389,16 +391,45 @@ def test_undrafted_sub_goes_into_the_pool(popped: Match) -> None:
 
 
 def test_captain_subbing_out_hands_the_role_to_the_sub(popped: Match) -> None:
-    match = ready_all(popped)
-    assert match.status == Status.CAPTAIN_PHASE
+    match = in_draft(popped)  # Captains exist once the vote has closed.
+    assert match.status == Status.PLAYER_DRAFT
     leaving = captain_of(match, "A").player
     request = self_sub(match, leaving)
     sub = make_player(77)
     subs.answer_offer(invite(request, leaving, sub).pk, sub, True)
     match = fresh(match)
     assert captain_of(match, "A").player == sub
-    keep_captains(match)
-    assert fresh(match).status == Status.PLAYER_DRAFT
+    assert match.participants.get(player=sub, is_active=True).is_captain
+    run_player_draft(match)
+    assert fresh(match).status == Status.SIDE_SELECT
+
+
+def test_a_sub_during_the_vote_drops_the_leavers_votes(
+    voting: Match, players: list[Player]
+) -> None:
+    lobby.cast_captain_votes(voting.pk, players[3], [players[5].pk])
+    lobby.cast_captain_votes(voting.pk, players[0], [players[3].pk])
+    request = self_sub(voting, players[3])
+    sub = make_player(60)
+    subs.answer_offer(invite(request, players[3], sub).pk, sub, True)
+    match = fresh(voting)
+    assert match.status == Status.CAPTAIN_PHASE  # The sub hasn't voted, so the vote stays open.
+    assert not CaptainVote.objects.filter(match=match, voter=players[3]).exists()
+    assert not CaptainVote.objects.filter(match=match, candidate=players[3]).exists()
+    lobby.cast_captain_votes(match.pk, sub, [sub.pk])
+
+
+def test_a_sub_during_the_side_claim_resumes_it(voting: Match) -> None:
+    match = run_player_draft(vote_captains(voting))
+    leaving = non_captain(match)
+    request = self_sub(match, leaving)
+    sub = make_player(61)
+    subs.answer_offer(invite(request, leaving, sub).pk, sub, True)
+    match = fresh(match)
+    assert match.status == Status.SIDE_SELECT
+    assert match.deadline_at is not None
+    draft.claim_side(match.pk, captain_of(match, "A").player, "hk")
+    assert fresh(match).status == Status.CHAMPION_DRAFT
 
 
 def test_lobby_host_subbing_out_makes_the_sub_host(popped: Match) -> None:

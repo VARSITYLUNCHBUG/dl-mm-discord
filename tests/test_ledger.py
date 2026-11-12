@@ -20,7 +20,7 @@ from league.models import (
 )
 from league.services import corrections, integrity, lobby, modes, ratings
 from tests.conftest import make_player
-from tests.helpers import fresh, play_full_match, ready_all, to_in_progress
+from tests.helpers import fresh, play_full_match, ready_all, to_in_progress, vote_captains
 
 pytestmark = pytest.mark.django_db
 
@@ -139,9 +139,9 @@ def test_match_voided_before_teams_cannot_be_rated(popped: Match) -> None:
         corrections.apply_outcome_correction(popped.pk, "A", actor=None, reason="x")
 
 
-def test_match_voided_during_captain_phase_cannot_be_rated(popped: Match) -> None:
+def test_match_voided_during_the_player_draft_cannot_be_rated(popped: Match) -> None:
     # Captains already have a team by then, so a check for any team member isn't enough.
-    match = ready_all(popped)
+    match = vote_captains(ready_all(popped))
     lobby.staff_void(match.pk, None, "Called off")
     with pytest.raises(InvalidAction, match="before teams were drafted"):
         corrections.apply_outcome_correction(match.pk, "A", actor=None, reason="x")
@@ -269,12 +269,12 @@ def test_live_match_keeps_pinned_mode_after_activation(popped: Match) -> None:
 
 
 def test_alternative_mode_runs_end_to_end(league: Community) -> None:
-    dcs = DraftModeVersion.objects.get(slug="dcs_s3_2ban")
-    modes.activate(league.pk, dcs.pk)
+    three_ban = DraftModeVersion.objects.get(slug="threeban_1win_2026")
+    modes.activate(league.pk, three_ban.pk)
     pool = [make_player(n) for n in range(1, 13)]
     match = play_full_match(league, pool, "A", 1)
     assert match.status == Status.COMPLETED
-    assert DraftAction.objects.filter(match=match, action="ban").count() == 4
+    assert DraftAction.objects.filter(match=match, action="ban").count() == 6
     assert DraftAction.objects.filter(match=match, action="pick").count() == 12
 
 

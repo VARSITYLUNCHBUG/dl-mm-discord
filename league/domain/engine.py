@@ -1,4 +1,4 @@
-"""Pure match rules: legal transitions, captain selection, timeout choices and a format dry-run.
+"""Pure match rules: legal transitions, the captain vote, timeout choices and a format dry-run.
 
 Nothing here touches Django or Discord, so every rule is testable in isolation. All randomness
 comes from `seeded_rng`, so a match's outcomes can be reproduced from its stored seed.
@@ -47,7 +47,7 @@ LIVE = frozenset(
 _TRANSITIONS: dict[str, frozenset[str]] = {
     Status.READY_CHECK: frozenset({Status.CAPTAIN_PHASE, Status.VOIDED}),
     Status.CAPTAIN_PHASE: frozenset({Status.PLAYER_DRAFT, Status.VOIDED}),
-    Status.PLAYER_DRAFT: frozenset({Status.SIDE_SELECT, Status.CHAMPION_DRAFT, Status.VOIDED}),
+    Status.PLAYER_DRAFT: frozenset({Status.SIDE_SELECT, Status.VOIDED}),
     Status.SIDE_SELECT: frozenset({Status.CHAMPION_DRAFT, Status.VOIDED}),
     Status.CHAMPION_DRAFT: frozenset({Status.LOBBY_CODE, Status.VOIDED}),
     Status.LOBBY_CODE: frozenset({Status.IN_PROGRESS, Status.VOIDED}),
@@ -74,27 +74,6 @@ class CaptainCandidate:
     player_id: int
     rating: int
     games: int
-
-
-def select_captains(
-    candidates: Sequence[CaptainCandidate], selection: str, min_games: int, seed: int
-) -> tuple[int, int]:
-    """Return (team A captain, team B captain).
-
-    Highest rating first; ties go to more games, then a seeded shuffle. If fewer than two players
-    meet `min_games`, the lobby falls back to choosing at random from everyone.
-    """
-    if len(candidates) < 2:
-        raise ValueError("Need at least two candidates.")
-    rng = seeded_rng(seed, "captains")
-    ordered_input = sorted(candidates, key=lambda c: c.player_id)
-    eligible = [c for c in ordered_input if c.games >= min_games]
-    if selection == "random" or len(eligible) < 2:
-        first, second = rng.sample(ordered_input, 2)
-        return first.player_id, second.player_id
-    tiebreak = {c.player_id: rng.random() for c in eligible}
-    ranked = sorted(eligible, key=lambda c: (-c.rating, -c.games, tiebreak[c.player_id]))
-    return ranked[0].player_id, ranked[1].player_id
 
 
 def tally_captain_votes(
@@ -144,17 +123,12 @@ def pick_gif(seed: int, gifs: Sequence[str]) -> str | None:
     return seeded_rng(seed, "draft-gif").choice(list(gifs))
 
 
-def first_pick_team(rule: str, rating_a: int, rating_b: int, seed: int, salt: str = "") -> str:
-    """Which team, A or B, makes the first player pick."""
-    coin = seeded_rng(seed, f"first-pick:{salt}").choice(["A", "B"])
-    if rule == "coin_flip" or rating_a == rating_b:
-        return coin
-    a_is_lower = rating_a < rating_b
-    if rule == "lower_rated_captain":
-        return "A" if a_is_lower else "B"
-    if rule == "higher_rated_captain":
-        return "B" if a_is_lower else "A"
-    raise ValueError(f"Unknown first-pick rule {rule!r}")
+def first_pick_team(rating_a: int, rating_b: int, seed: int) -> str:
+    """Which team, A or B, makes the first player pick: the lower-rated captain's. A tie is a
+    seeded coin flip."""
+    if rating_a == rating_b:
+        return coin_flip_team(seed, "first-pick:")
+    return "A" if rating_a < rating_b else "B"
 
 
 def coin_flip_team(seed: int, purpose: str) -> str:

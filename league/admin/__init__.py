@@ -11,7 +11,6 @@ from django.http import HttpRequest
 
 from league.domain.mode_schema import ModeValidationError
 from league.models import (
-    CaptainHandoff,
     CaptainVote,
     Champion,
     Community,
@@ -219,11 +218,6 @@ class RatingEventAdmin(ReadOnlyAdmin):
 @admin.register(QueueEntry)
 class QueueEntryAdmin(ReadOnlyAdmin):
     list_display = ("player", "community", "joined_at")
-
-
-@admin.register(CaptainHandoff)
-class CaptainHandoffAdmin(ReadOnlyAdmin):
-    list_display = ("match", "team", "from_player", "to_player", "status", "created_at")
 
 
 @admin.register(CaptainVote)

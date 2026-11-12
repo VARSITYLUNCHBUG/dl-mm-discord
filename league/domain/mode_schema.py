@@ -1,5 +1,9 @@
-"""The draft mode file format. Anything not listed here is rejected, including simultaneous or
-blind steps, which the v1 engine does not implement."""
+"""The draft mode file format.
+
+Every mode runs the same flow: a captain vote, the player draft, a side claim, then the champion
+draft with the Hidden King team ("first") banning and picking first. A mode only sets timers, team
+size, the player draft order, the ban and pick order and excluded champions. Anything not listed
+here is rejected, including simultaneous or blind steps, which the v1 engine does not implement."""
 
 from __future__ import annotations
 
@@ -25,20 +29,11 @@ class ReadyCheck(_Strict):
     backfill: Literal["next_in_queue"] = "next_in_queue"
 
 
-class Handoff(_Strict):
-    requests_per_captain: Annotated[int, Field(ge=0, le=5)] = 2
-    accept_seconds: Seconds = 30
-
-
 class Captains(_Strict):
-    # "vote": once everyone is ready, players vote for up to two captains. Elo fills any gaps.
-    selection: Literal["top_rating", "random", "vote"] = "top_rating"
-    min_games: Annotated[int, Field(ge=0)] = 0
-    first_pick: Literal["lower_rated_captain", "higher_rated_captain", "coin_flip"] = (
-        "lower_rated_captain"
-    )
-    phase_seconds: Seconds = 20  # The keep-or-hand-off window, or how long the vote lasts.
-    handoff: Handoff = Handoff()
+    """Once everyone is ready, players vote for up to two captains. Elo fills any gaps, and the
+    lower-rated captain makes the first player pick."""
+
+    vote_seconds: Seconds = 45
 
 
 class PlayerDraft(_Strict):
@@ -54,20 +49,13 @@ class Step(_Strict):
     seconds: Seconds | None = None
 
 
-class OnTimeout(_Strict):
-    ban: Literal["skip", "auto_random"] = "skip"
-    pick: Literal["auto_random"] = "auto_random"
-
-
 class ChampionDraft(_Strict):
-    # "coin_flip": first pick and side are flipped separately. "hidden_king_first": the captains
-    # claim a side, and the Hidden King team bans and picks first.
-    priority: Literal["coin_flip", "hidden_king_first"] = "coin_flip"
-    side_seconds: Seconds = 20  # How long the captains have to claim a side.
+    """The captains claim a side, then the Hidden King team ("first") bans and picks first. A
+    timed-out ban or pick takes a random champion, and the acting captain can press Random."""
+
+    side_seconds: Seconds = 20  # How long the captains have to claim a side. Then a coin flip.
     seconds: Seconds = 30
     excluded_champion_ids: tuple[int, ...] = ()
-    on_timeout: OnTimeout = OnTimeout()
-    random_button: bool = False  # Lets the acting captain take a random champion.
     steps: Annotated[tuple[Step, ...], Field(min_length=1)]
 
 
@@ -123,14 +111,6 @@ class DraftMode(_Strict):
             raise ValueError(
                 f"player_draft.order: each captain must make {need} picks; "
                 f"got F={first}, S={second}"
-            )
-        return self
-
-    @model_validator(mode="after")
-    def _check_vote_has_no_handoff(self) -> DraftMode:
-        if self.captains.selection == "vote" and self.captains.handoff.requests_per_captain:
-            raise ValueError(
-                "captains.handoff.requests_per_captain: must be 0 when captains are voted in"
             )
         return self
 

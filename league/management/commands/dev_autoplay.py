@@ -29,7 +29,7 @@ class Command(BaseCommand):
     help = "Local smoke tests only: play a full match. Refused unless DEBUG is on."
 
     def add_arguments(self, parser: Any) -> None:
-        parser.add_argument("--mode", default="threeban_1win_2026", help="Draft mode slug")
+        parser.add_argument("--mode", default="bebot_2ban", help="Draft mode slug")
         parser.add_argument("--lead-in", type=float, default=0, help="Seconds before starting")
         parser.add_argument("--pause", type=float, default=20, help="Seconds at each phase")
         parser.add_argument("--step", type=float, default=2, help="Seconds between draft steps")
@@ -58,7 +58,7 @@ class Command(BaseCommand):
 
         for participant in self._fresh(match).participants.filter(is_active=True):
             self._act(lobby.mark_ready, match.pk, participant.player)
-        self._captain_phase(match)
+        self._captain_vote(match)
         self._player_draft(match)
         self._side_select(match)
         self._champion_draft(match)
@@ -114,42 +114,6 @@ class Command(BaseCommand):
             raise CommandError("The queue didn't pop: is someone already queued or penalised?")
         return match
 
-    def _captain_phase(self, match: Match) -> None:
-        match = self._fresh(match)
-        if lobby.is_vote(match):
-            self._captain_vote(match)
-            return
-        self._pause("Captains")
-        # Show a declined hand-off and an accepted one, using whichever captain is fake.
-        fake_captain = next(
-            (
-                row
-                for row in match.participants.filter(is_captain=True).select_related("player")
-                if dev.is_fake(row.player.discord_user_id)
-            ),
-            None,
-        )
-        if fake_captain is not None:
-            others = list(
-                match.participants.filter(
-                    is_captain=False, is_active=True, player__discord_user_id__lt=dev.FAKE_ID_LIMIT
-                )[:2]
-            )
-            for accept, target in zip((False, True), others, strict=False):
-                captain = self._fresh(match).participants.get(
-                    team=fake_captain.team, is_captain=True
-                )
-                handoff = self._act(
-                    lobby.request_handoff, match.pk, captain.player, target.player_id
-                )
-                if handoff is None:
-                    continue
-                verb = "accept" if accept else "decline"
-                self._pause(f"Hand-off waiting for {target.player} to {verb}")
-                self._act(lobby.respond_handoff, handoff.pk, target.player, accept)
-        for row in self._fresh(match).participants.filter(is_captain=True, is_active=True):
-            self._act(lobby.keep_captaincy, match.pk, row.player)
-
     def _captain_vote(self, match: Match) -> None:
         """Everyone votes for two random players. Real players' votes are cast for them too."""
         self._pause("Captain vote")
@@ -163,11 +127,10 @@ class Command(BaseCommand):
 
     def _side_select(self, match: Match) -> None:
         match = self._fresh(match)
-        if match.status != Status.SIDE_SELECT:
-            return
         self._pause("Teams set: claim a side")
         team = random.choice(["A", "B"])
-        self._act(draft.claim_side, match.pk, captain_of(match, team).player, "hk")
+        side = random.choice(["hk", "am"])
+        self._act(draft.claim_side, match.pk, captain_of(match, team).player, side)
 
     def _player_draft(self, match: Match) -> None:
         self._pause("Player draft started")
@@ -192,8 +155,11 @@ class Command(BaseCommand):
         while match.status == Status.CHAMPION_DRAFT:
             step = build_plan(mode_of(match))[match.step_index]
             captain = captain_of(match, team_for_role(step.role, match.champion_first_pick)).player
-            champion = random.choice(draft.available_champions(match))
-            self._act(draft.choose_champion, match.pk, captain, match.step_index, champion)
+            if random.random() < 0.2:  # Now and then press Random, so the 🎲 shows.
+                self._act(draft.choose_random_champion, match.pk, captain, match.step_index)
+            else:
+                champion = random.choice(draft.available_champions(match))
+                self._act(draft.choose_champion, match.pk, captain, match.step_index, champion)
             time.sleep(self.step_seconds)
             match = self._fresh(match)
 

@@ -30,7 +30,7 @@ ACCENT_VOID = 0x80848E
 
 STATUS_TITLES = {
     Status.READY_CHECK: "Ready check",
-    Status.CAPTAIN_PHASE: "Captains",
+    Status.CAPTAIN_PHASE: "Captain vote",
     Status.PLAYER_DRAFT: "Player draft",
     Status.SIDE_SELECT: "Choose sides",
     Status.CHAMPION_DRAFT: "Champion draft",
@@ -53,9 +53,10 @@ def player_mention(discord_user_id: int, name: str) -> str:
 # What happens when each timer runs out. Each reads on from Discord's "in 18 seconds".
 TIMER_LABELS = {
     Status.READY_CHECK: "Ready check closes",
-    Status.CAPTAIN_PHASE: "Captains lock",
+    Status.CAPTAIN_PHASE: "Vote closes",
     Status.PLAYER_DRAFT: "Auto-pick",
     Status.SIDE_SELECT: "Coin flip",
+    Status.CHAMPION_DRAFT: "Auto-pick",
     Status.LOBBY_CODE: "Code due",
     Status.AWAITING_CONFIRMATION: "Confirms automatically",
 }
@@ -76,11 +77,7 @@ def countdown(state: BoardState) -> str:
     # is a footer: it's a fallback, not the first thing players should read as the game starts.
     if state.deadline_at is None or state.status in {Status.DISPUTED, Status.IN_PROGRESS}:
         return ""
-    if state.status == Status.CHAMPION_DRAFT:
-        skips = state.step_action == "ban" and state.ban_timeout_skips
-        label = "Auto-skip" if skips else "Auto-pick"
-    else:
-        label = TIMER_LABELS.get(state.status, "Ends")
+    label = TIMER_LABELS.get(state.status, "Ends")
     return f"{label} <t:{int(state.deadline_at.timestamp())}:R>"
 
 
@@ -169,51 +166,6 @@ def _captain_vote(state: BoardState, box: Container[Any]) -> None:
                 min_values=1,
                 max_values=min(2, len(options)),
             )
-        )
-    )
-
-
-def _captains(state: BoardState, box: Container[Any]) -> None:
-    if state.captain_vote:
-        _captain_vote(state, box)
-        return
-    lines = []
-    for team in ("A", "B"):
-        captain = next((p for p in state.players if p.is_captain and p.team == team), None)
-        if captain is None:
-            continue
-        mark = "✅ keeping it" if captain.confirmed_captain else "⏳ keeps it unless they hand off"
-        left = state.handoffs_left.get(team, 0)
-        plural = "" if left == 1 else "s"
-        lines.append(
-            f"**{state.team_name(team)}** ({captain.rating}): {mark} · {left} hand-off{plural} left"
-        )
-    box.add_item(TextDisplay("\n".join(lines)))
-    for handoff in state.handoffs:
-        target = player_mention(handoff.to_discord_user_id, handoff.to_name)
-        box.add_item(TextDisplay(f"{handoff.from_name} asked {target} to take over as captain."))
-        box.add_item(
-            ActionRow(
-                RouteButton(
-                    "handoff_accept",
-                    state.match_id,
-                    handoff.id,
-                    label=f"{handoff.to_name}: accept",
-                    style=ButtonStyle.success,
-                ),
-                RouteButton(
-                    "handoff_decline",
-                    state.match_id,
-                    handoff.id,
-                    label="Decline",
-                    style=ButtonStyle.danger,
-                ),
-            )
-        )
-    box.add_item(
-        ActionRow(
-            RouteButton("keep", state.match_id, label="Keep it", style=ButtonStyle.primary),
-            RouteButton("handoff_open", state.match_id, label="Hand off"),
         )
     )
 
@@ -354,7 +306,7 @@ def _champion_draft(state: BoardState, box: Container[Any]) -> None:
     else:
         for row in _champion_rows(state, state.champions[:BOARD_GRID_SIZE]):
             box.add_item(row)
-    if state.random_button and not _has_picker(state):
+    if not _has_picker(state):
         box.add_item(ActionRow(_random_button(state)))
 
 
@@ -376,15 +328,14 @@ def _has_picker(state: BoardState) -> bool:
 def render_picker(state: BoardState) -> LayoutView | None:
     """The rest of the champion grid, in a second message directly below the board.
 
-    The Random button sits here too when there is one: the board has no components to spare.
+    The Random button sits here too: the board has no components to spare.
     """
     if state.status != Status.CHAMPION_DRAFT or not _has_picker(state) or state.on_hold:
         return None
     view = LayoutView(timeout=None)
     for row in _champion_rows(state, state.champions[BOARD_GRID_SIZE:]):
         view.add_item(row)
-    if state.random_button:
-        view.add_item(ActionRow(_random_button(state)))
+    view.add_item(ActionRow(_random_button(state)))
     return view
 
 
@@ -399,13 +350,12 @@ def _final_draft_summary(state: BoardState) -> str:
 
 
 def _lobby_code(state: BoardState, box: Container[Any]) -> None:
-    if state.hidden_king_first:  # The Bebot flow ends its draft with a name, a GIF and GLHF.
-        box.add_item(TextDisplay(f"### 🏆 Draft: {state.draft_name} 🏆"))
+    # The draft ends with a name, the summary, a GIF and GLHF.
+    box.add_item(TextDisplay(f"### 🏆 Draft: {state.draft_name} 🏆"))
     box.add_item(TextDisplay(_final_draft_summary(state)))
-    if state.hidden_king_first:
-        if state.gif_url:
-            box.add_item(MediaGallery(discord.MediaGalleryItem(state.gif_url)))
-        box.add_item(TextDisplay("# GLHF"))
+    if state.gif_url:
+        box.add_item(MediaGallery(discord.MediaGalleryItem(state.gif_url)))
+    box.add_item(TextDisplay("# GLHF"))
     box.add_item(Separator())
     box.add_item(TextDisplay(f"**{state.host_name}** hosts: create the custom lobby.\n{CHECKLIST}"))
     box.add_item(
@@ -516,7 +466,7 @@ def _finished(state: BoardState, box: Container[Any]) -> None:
 
 _SECTIONS = {
     Status.READY_CHECK: _ready,
-    Status.CAPTAIN_PHASE: _captains,
+    Status.CAPTAIN_PHASE: _captain_vote,
     Status.PLAYER_DRAFT: _player_draft,
     Status.SIDE_SELECT: _side_select,
     Status.CHAMPION_DRAFT: _champion_draft,

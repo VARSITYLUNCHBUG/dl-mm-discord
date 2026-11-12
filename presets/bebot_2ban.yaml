@@ -1,7 +1,7 @@
-# The live server's flow, carried over from Bebot (simpleDraft): players vote for captains, the
-# captains draft players, then claim a side. Hidden King ("first") bans and picks first.
-# The hero order is Bebot's 16 steps, the same as dcs_s3_2ban. 40 s a turn; a timeout takes a
-# random champion for bans as well as picks, and captains can press Random.
+# The default mode, carried over from Bebot (simpleDraft). Every mode runs the same flow: players
+# vote for captains, the captains draft players, then claim a side. Hidden King ("first") bans and
+# picks first, a timeout takes a random champion and captains can press Random.
+# The hero order is Bebot's 16 steps, the same as dcs_s3_2ban, at 40 s a turn.
 schema_version: 1
 slug: bebot_2ban
 name: "2-ban draft (Bebot flow)"
@@ -10,20 +10,12 @@ provenance:
   night_shift_status: not_night_shift
 team_size: 6
 ready_check: { seconds: 180, backfill: next_in_queue }
-captains:
-  selection: vote
-  min_games: 0
-  first_pick: lower_rated_captain
-  phase_seconds: 45
-  handoff: { requests_per_captain: 0, accept_seconds: 30 }
+captains: { vote_seconds: 45 }
 player_draft: { order: FSSFFSSFFS, seconds: 45, on_timeout: auto_highest_rating }
 champion_draft:
-  priority: hidden_king_first
   side_seconds: 20
   seconds: 40
   excluded_champion_ids: []
-  on_timeout: { ban: auto_random, pick: auto_random }
-  random_button: true
   steps:
     - { action: ban, team: first }
     - { action: ban, team: second }

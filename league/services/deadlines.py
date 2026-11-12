@@ -9,8 +9,7 @@ from django.db import transaction
 
 from league.domain.engine import LIVE, Status
 from league.domain.errors import DomainError
-from league.models import CaptainHandoff, Community, Match
-from league.models.matches import HandoffStatus
+from league.models import Community, Match
 from league.services import draft, lobby, queue, results, subs
 from league.services.common import lock_match, now
 
@@ -42,32 +41,10 @@ def fire_match_deadline(match_id: int) -> bool:
         return True
 
 
-def fire_handoff_deadline(handoff_id: int) -> None:
-    with transaction.atomic():
-        handoff = CaptainHandoff.objects.select_related("match").get(pk=handoff_id)
-        if handoff.status == HandoffStatus.PENDING and handoff.deadline_at <= now():
-            lobby.expire_handoff(handoff)
-
-
 def tick() -> int:
     """One poller pass. A failure in one match is logged and cannot block the others."""
     moment = now()
     fired = 0
-    # A paused match's hand-offs wait too. They get time back when the sub arrives.
-    handoffs = CaptainHandoff.objects.filter(
-        status=HandoffStatus.PENDING, deadline_at__lte=moment, match__held_seconds__isnull=True
-    )
-    for handoff_id in handoffs.values_list("pk", flat=True):
-        try:
-            fire_handoff_deadline(handoff_id)
-            fired += 1
-        except DomainError as exc:
-            logger.info(
-                "Handoff deadline skipped", extra={"handoff": handoff_id, "why": exc.message}
-            )
-        except Exception:
-            logger.exception("Handoff deadline failed", extra={"handoff": handoff_id})
-
     due = Match.objects.filter(status__in=LIVE, deadline_at__lte=moment)
     for match_id in due.values_list("pk", flat=True):
         try:
@@ -94,8 +71,5 @@ def extend_past_due(grace_seconds: int = STARTUP_GRACE_SECONDS) -> int:
     count = Match.objects.filter(status__in=LIVE, deadline_at__lt=new_deadline).update(
         deadline_at=new_deadline
     )
-    count += CaptainHandoff.objects.filter(
-        status=HandoffStatus.PENDING, deadline_at__lt=new_deadline
-    ).update(deadline_at=new_deadline)
     count += subs.extend_past_due(new_deadline)
     return count

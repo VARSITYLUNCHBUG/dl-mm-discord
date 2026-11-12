@@ -141,10 +141,7 @@ def pick_player(
 def _advance_player_draft(match: Match, mode: DraftMode) -> None:
     match.step_index += 1
     if match.step_index >= player_draft_length(mode):
-        if mode.champion_draft.priority == "hidden_king_first":
-            begin_side_select(match, mode)
-        else:
-            begin_champion_draft(match, mode)
+        begin_side_select(match, mode)
         return
     remaining = _undrafted(match)
     if len(remaining) == 1:
@@ -182,19 +179,11 @@ def on_player_draft_timeout(match: Match) -> None:
 # --- Champion draft --------------------------------------------------------------------------
 
 
-def _teams_set(match: Match, text: str) -> None:
-    """The player draft is over: make the team voice channels and tell the captains."""
-    add_effect(
-        match.community, "create_team_voice", match=match, dedupe_key=f"team_voice:{match.pk}"
-    )
-    captain_ids = [captain_of(match, team).player.discord_user_id for team in ("A", "B")]
-    add_effect(match.community, "ping", {"user_ids": captain_ids, "text": text}, match=match)
-
-
 SIDES = {"hk": "Hidden King", "am": "The Archmother"}
 
 
 def begin_side_select(match: Match, mode: DraftMode) -> None:
+    """The player draft is over: make team voice channels and have the captains claim a side."""
     transition(
         match,
         Status.SIDE_SELECT,
@@ -202,7 +191,19 @@ def begin_side_select(match: Match, mode: DraftMode) -> None:
         deadline_at=seconds_from_now(mode.champion_draft.side_seconds),
     )
     save_transition(match, "step_index")
-    _teams_set(match, "teams are set. Claim a side: Hidden King bans and picks first.")
+    add_effect(
+        match.community, "create_team_voice", match=match, dedupe_key=f"team_voice:{match.pk}"
+    )
+    captain_ids = [captain_of(match, team).player.discord_user_id for team in ("A", "B")]
+    add_effect(
+        match.community,
+        "ping",
+        {
+            "user_ids": captain_ids,
+            "text": "teams are set. Claim a side: Hidden King bans and picks first.",
+        },
+        match=match,
+    )
     render_board(match)
 
 
@@ -229,14 +230,10 @@ def on_side_timeout(match: Match) -> None:
 
 
 def begin_champion_draft(
-    match: Match, mode: DraftMode, *, source: str = Source.SYSTEM, actor: Player | None = None
+    match: Match, mode: DraftMode, *, source: str, actor: Player | None = None
 ) -> None:
-    claimed = mode.champion_draft.priority == "hidden_king_first"
-    if claimed:
-        match.champion_first_pick = match.hidden_king_team
-    else:
-        match.champion_first_pick = coin_flip_team(match.rng_seed, "champion-first-pick")
-        match.hidden_king_team = coin_flip_team(match.rng_seed, "side")
+    """Sides are set. The Hidden King team bans and picks first."""
+    match.champion_first_pick = match.hidden_king_team
     step = build_plan(mode)[match.step_index]
     transition(
         match,
@@ -246,19 +243,16 @@ def begin_champion_draft(
         deadline_at=seconds_from_now(step.seconds),
     )
     save_transition(match, "champion_first_pick", "hidden_king_team", "step_index")
-    if claimed:
-        hidden_king = captain_of(match, match.hidden_king_team).player
-        add_effect(
-            match.community,
-            "ping",
-            {
-                "user_ids": [hidden_king.discord_user_id],
-                "text": "you're Hidden King. You ban first. The champion draft is on.",
-            },
-            match=match,
-        )
-    else:
-        _teams_set(match, "teams are set. The champion draft is on.")
+    hidden_king = captain_of(match, match.hidden_king_team).player
+    add_effect(
+        match.community,
+        "ping",
+        {
+            "user_ids": [hidden_king.discord_user_id],
+            "text": "you're Hidden King. You ban first. The champion draft is on.",
+        },
+        match=match,
+    )
     render_board(match)
 
 
@@ -318,8 +312,6 @@ def choose_random_champion(
         raise StaleAction("The champion draft has finished.")
     require_not_on_hold(match)
     mode = mode_of(match)
-    if not mode.champion_draft.random_button:
-        raise InvalidAction("Random isn't available in this format.")
     step = _current_step(match, mode, step_index)
     team = _acting_team(match, step)
     _require_acting_captain(match, team, captain)
@@ -342,11 +334,7 @@ def on_champion_draft_timeout(match: Match) -> None:
     mode = mode_of(match)
     step = _current_step(match, mode, None)
     team = _acting_team(match, step)
-    champion: int | None
-    if step.action == "ban" and mode.champion_draft.on_timeout.ban == "skip":
-        champion = None
-    else:
-        champion = auto_champion(available_champions(match), match.rng_seed, step.index)
+    champion = auto_champion(available_champions(match), match.rng_seed, step.index)
     _record(match, step, team, actor=None, source=Source.TIMEOUT, target_champion_id=champion)
     _advance_champion_draft(match, mode)
 

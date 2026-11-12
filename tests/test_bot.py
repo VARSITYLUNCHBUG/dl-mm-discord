@@ -46,15 +46,18 @@ from league.services import results as results_service
 from league.services.boards import ResultRow
 from league.services.common import add_effect, captain_of, get_or_create_player, mode_of
 from league.services.common import render_queue as request_queue
-from tests.conftest import make_player
+from tests.conftest import make_player, publish_presets
 from tests.helpers import (
+    acting_captain,
+    claim_sides,
     finish,
     fresh,
-    keep_captains,
     ready_all,
     run_champion_draft,
     run_player_draft,
+    to_champion_draft,
     to_in_progress,
+    vote_captains,
 )
 
 # Discord's limits for a Components V2 message.
@@ -122,14 +125,14 @@ def test_button_and_select_ids_match_their_templates() -> None:
     import re
 
     assert re.fullmatch(BUTTON_TEMPLATE, button_id("ready", 42))
-    assert re.fullmatch(BUTTON_TEMPLATE, button_id("handoff_accept", 42, 7))
+    assert re.fullmatch(BUTTON_TEMPLATE, button_id("claim_side", 42, "hk"))
     assert re.fullmatch(SELECT_TEMPLATE, select_id("pick_champion", 42, "12.1"))
     assert not re.fullmatch(BUTTON_TEMPLATE, select_id("pick_champion", 42, "12.1"))
     assert BUTTON_TEMPLATE != SELECT_TEMPLATE
 
 
 def test_custom_ids_fit_discords_limit() -> None:
-    assert len(select_id("handoff_decline", 10**12, "12345.12")) <= 100
+    assert len(select_id("captain_vote", 10**12, "12345.12")) <= 100
 
 
 @pytest.mark.django_db
@@ -139,11 +142,10 @@ def test_every_rendered_action_has_a_handler(league: Community, players: list[Pl
     match = Match.objects.get()
     states = [boards.board_state(match.pk)]
     match = ready_all(match)
-    lobby.request_handoff(
-        match.pk,
-        match.participants.filter(is_captain=True).first().player,
-        match.participants.filter(is_captain=False).first().player_id,
-    )
+    states.append(boards.board_state(match.pk))
+    match = run_player_draft(vote_captains(match))
+    states.append(boards.board_state(match.pk))
+    match = claim_sides(match)
     states.append(boards.board_state(match.pk))
     actions = registered_actions()
     for state in states:
@@ -180,12 +182,12 @@ def test_every_phase_renders_within_discord_limits(popped: Match) -> None:
     check(popped)
     match = ready_all(popped)
     check(match)
-    match = keep_captains(match)
+    match = vote_captains(match)
     check(match)
     match = run_player_draft(match)
     check(match)
-    from tests.helpers import run_champion_draft
-
+    match = claim_sides(match)
+    check(match)
     match = run_champion_draft(match)
     check(match)
     draft.submit_lobby_code(match.pk, match.lobby_code_host, "ABC123")
@@ -205,6 +207,7 @@ def test_every_phase_renders_within_discord_limits(popped: Match) -> None:
         Status.READY_CHECK,
         Status.CAPTAIN_PHASE,
         Status.PLAYER_DRAFT,
+        Status.SIDE_SELECT,
         Status.CHAMPION_DRAFT,
         Status.LOBBY_CODE,
         Status.IN_PROGRESS,
@@ -215,26 +218,32 @@ def test_every_phase_renders_within_discord_limits(popped: Match) -> None:
 
 
 def draft_buttons(view: discord.ui.LayoutView) -> list[dict[str, Any]]:
-    """The draft's own buttons, leaving out the Request a sub button every live board has."""
-    return [b for b in all_buttons(view.to_components()) if ":sub_" not in b.get("custom_id", "")]
+    """The draft's own buttons, leaving out the Request a sub and Random buttons."""
+    skip = (":sub_", ":random_champion:")
+    return [
+        b
+        for b in all_buttons(view.to_components())
+        if not any(part in b.get("custom_id", "") for part in skip)
+    ]
 
 
 def grid_buttons(state: boards.BoardState) -> list[dict[str, Any]]:
     picker = render_picker(state)
-    rest = all_buttons(picker.to_components()) if picker is not None else []
+    rest = draft_buttons(picker) if picker is not None else []
     return draft_buttons(render_board(state)) + rest
 
 
 @pytest.mark.django_db
 def test_champion_grid_shows_all_44_across_the_board_and_a_picker(popped: Match) -> None:
-    match = run_player_draft(keep_captains(ready_all(popped)))
+    match = to_champion_draft(popped)
     state = boards.board_state(match.pk)
     assert len(state.champions) == 44
     board_view = render_board(state)
     picker = render_picker(state)
     assert picker is not None
     assert len(draft_buttons(board_view)) == 25
-    assert len(all_buttons(picker.to_components())) == 19
+    assert len(draft_buttons(picker)) == 19
+    assert [b["label"] for b in all_buttons(picker.to_components())][-1] == "Random"
     assert not all_selects(board_view.to_components())
     labels = [button["label"] for button in grid_buttons(state)]
     assert labels == sorted(labels)  # Alphabetical across both messages.
@@ -242,7 +251,7 @@ def test_champion_grid_shows_all_44_across_the_board_and_a_picker(popped: Match)
 
 @pytest.mark.django_db
 def test_a_taken_champion_stays_in_place_greyed_out(popped: Match) -> None:
-    match = run_player_draft(keep_captains(ready_all(popped)))
+    match = to_champion_draft(popped)
     before = grid_buttons(boards.board_state(match.pk))
     assert {button["style"] for button in before} == {discord.ButtonStyle.danger.value}  # Bans.
 
@@ -262,7 +271,7 @@ def test_a_taken_champion_stays_in_place_greyed_out(popped: Match) -> None:
 
 @pytest.mark.django_db
 def test_champion_buttons_turn_green_on_a_pick(popped: Match) -> None:
-    match = run_player_draft(keep_captains(ready_all(popped)))
+    match = to_champion_draft(popped)
     plan = build_plan(mode_of(match))
     while plan[match.step_index].action != "pick":
         step = plan[match.step_index]
@@ -278,15 +287,15 @@ def test_champion_buttons_turn_green_on_a_pick(popped: Match) -> None:
 
 @pytest.mark.django_db
 def test_champion_board_says_how_far_along_the_draft_is(popped: Match) -> None:
-    match = run_player_draft(keep_captains(ready_all(popped)))
+    match = to_champion_draft(popped)
     state = boards.board_state(match.pk)
     payload = str(render_board(state).to_components())
-    assert f"**{state.acting_captain_name}** is banning: ban 1 of 6." in payload
+    assert f"**{state.acting_captain_name}** is banning: ban 1 of 4." in payload
 
 
 @pytest.mark.django_db
 def test_player_draft_shows_everyone_as_buttons_and_never_reflows(popped: Match) -> None:
-    match = keep_captains(ready_all(popped))
+    match = vote_captains(ready_all(popped))
     before = draft_buttons(render_board(boards.board_state(match.pk)))
     assert len(before) == 10
     assert not all_selects(render_board(boards.board_state(match.pk)).to_components())
@@ -303,7 +312,7 @@ def test_player_draft_shows_everyone_as_buttons_and_never_reflows(popped: Match)
 
 @pytest.mark.django_db
 def test_player_draft_says_which_pick_of_a_double_turn_it_is(popped: Match) -> None:
-    match = keep_captains(ready_all(popped))
+    match = vote_captains(ready_all(popped))
     step = build_plan(mode_of(match))[match.step_index]
     captain = captain_of(match, team_for_role(step.role, match.player_first_pick)).player
     target = match.participants.filter(is_active=True, team="").order_by("id").first()
@@ -390,7 +399,9 @@ def test_game_on_board_reports_with_a_button_per_team() -> None:
     [
         (Status.READY_CHECK, "", "Ready check closes"),
         (Status.PLAYER_DRAFT, "player_pick", "Auto-pick"),
-        (Status.CHAMPION_DRAFT, "ban", "Auto-skip"),
+        (Status.CAPTAIN_PHASE, "", "Vote closes"),
+        (Status.SIDE_SELECT, "", "Coin flip"),
+        (Status.CHAMPION_DRAFT, "ban", "Auto-pick"),
         (Status.CHAMPION_DRAFT, "pick", "Auto-pick"),
         (Status.AWAITING_CONFIRMATION, "", "Confirms automatically"),
     ],
@@ -725,13 +736,7 @@ ARCHIVE_CHANNEL = 7004
 
 @pytest.fixture
 def wired(transactional_db: None) -> Iterator[Community]:
-    from django.conf import settings
-
-    from league.services import champions, modes
-
-    presets = settings.BASE_DIR / "presets"
-    champions.seed_from_file(presets / "champions.yaml")
-    modes.publish(modes.load_yaml(presets / "threeban_1win_2026.yaml"))
+    publish_presets()
     row = community.ensure(guild_id=999, name="Test")
     community.save_wiring(
         row.pk,
@@ -846,7 +851,7 @@ def test_full_match_through_effects(wired: Community) -> None:
     assert resource(match, ResourceKind.BOARD_MESSAGE)
     assert not gateway.dms
 
-    match = run_player_draft(keep_captains(ready_all(match)))
+    match = to_champion_draft(match)
     drain(gateway)
     team_a = resource(match, ResourceKind.TEAM_A_VOICE)
     team_b = resource(match, ResourceKind.TEAM_B_VOICE)
@@ -894,7 +899,7 @@ def test_player_not_in_lobby_voice_gets_team_invite(wired: Community) -> None:
         queue.join(wired.pk, player)
     drain(gateway)
     gateway.dms.clear()
-    run_player_draft(keep_captains(ready_all(Match.objects.get())))
+    to_champion_draft(Match.objects.get())
     drain(gateway)
     assert len(gateway.dms) == 12
     assert "Join team voice" in str(gateway.dms[0][1].to_components())
@@ -1104,21 +1109,33 @@ def test_board_stays_last_and_only_current_pings_survive_a_whole_match(wired: Co
     drain(gateway)
     assert_board_last(gateway, match)
     assert live_notice_texts(gateway, match) == [
-        "you're captain. You keep the role unless you hand it off before the timer ends."
+        "everyone's ready. Vote for up to two captains on the board."
     ]
 
-    match = keep_captains(match)
+    match = vote_captains(match)
     drain(gateway)
     assert_board_last(gateway, match)
     first = captain_of(match, match.player_first_pick).player.display_name
+    captain_a = captain_of(match, "A").player.display_name
+    captain_b = captain_of(match, "B").player.display_name
     assert live_notice_texts(gateway, match) == [
-        f"the player draft is on. **{first}** picks first."
+        f"the player draft is on. **{first}** picks first.",
+        f"Captains voted in: **{captain_a}** (12 votes) and **{captain_b}** (12 votes).",
     ]
 
     match = run_player_draft(match)
     drain(gateway)
     assert_board_last(gateway, match)
-    assert live_notice_texts(gateway, match) == ["teams are set. The champion draft is on."]
+    assert live_notice_texts(gateway, match) == [
+        "teams are set. Claim a side: Hidden King bans and picks first."
+    ]
+
+    match = claim_sides(match)
+    drain(gateway)
+    assert_board_last(gateway, match)
+    assert live_notice_texts(gateway, match) == [
+        "you're Hidden King. You ban first. The champion draft is on."
+    ]
 
     match = to_in_progress(match)
     drain(gateway)
@@ -1152,7 +1169,7 @@ def test_chat_survives_every_move_and_clear(wired: Community) -> None:
     match = ready_all(match)
     drain(gateway)
     chat.append(gateway.chat(text_id))
-    match = keep_captains(match)
+    match = vote_captains(match)
     drain(gateway)
     assert set(chat) <= set(channel_order(gateway, match))
     assert_board_last(gateway, match)
@@ -1225,7 +1242,7 @@ def test_chat_from_before_a_move_no_longer_counts(wired: Community) -> None:
 @pytest.mark.django_db(transaction=True)
 def test_champion_picker_follows_the_board_and_goes_when_the_draft_ends(wired: Community) -> None:
     gateway = FakeGateway()
-    match = run_player_draft(keep_captains(ready_all(popped_match(wired, gateway))))
+    match = to_champion_draft(popped_match(wired, gateway))
     drain(gateway)
     board = resource(match, ResourceKind.BOARD_MESSAGE)
     picker = resource(match, ResourceKind.PICKER_MESSAGE)
@@ -1265,7 +1282,7 @@ def test_champion_picker_follows_the_board_and_goes_when_the_draft_ends(wired: C
 @pytest.mark.django_db(transaction=True)
 def test_a_deleted_board_comes_back_above_the_picker(wired: Community) -> None:
     gateway = FakeGateway()
-    match = run_player_draft(keep_captains(ready_all(popped_match(wired, gateway))))
+    match = to_champion_draft(popped_match(wired, gateway))
     drain(gateway)
     text_id = resource(match, ResourceKind.TEXT)
     old_picker = resource(match, ResourceKind.PICKER_MESSAGE)
@@ -1335,7 +1352,7 @@ def test_chat_in_a_closed_channel_is_ignored(wired: Community) -> None:
 def test_a_new_lobby_host_replaces_the_first_hosts_prompt(wired: Community) -> None:
     gateway = FakeGateway()
     match = popped_match(wired, gateway)
-    match = run_champion_draft(run_player_draft(keep_captains(ready_all(match))))
+    match = run_champion_draft(to_champion_draft(match))
     drain(gateway)
     first = effects.live_notices(match.pk)
     assert len(first) == 1
@@ -1373,7 +1390,7 @@ def test_a_failed_board_move_does_not_ping_twice(wired: Community) -> None:
         run_after=effects.now()
     )
     drain(gateway)
-    assert len([row for row in gateway.texts if "you're captain" in row[1]]) == 1
+    assert len([row for row in gateway.texts if "Vote for up to two captains" in row[1]]) == 1
     assert_board_last(gateway, match)
 
 
@@ -1405,7 +1422,7 @@ def test_only_other_peoples_server_messages_count_as_chat(
 def test_paused_board_drops_the_grid_and_fits_with_two_sub_requests(popped: Match) -> None:
     from league.services import subs
 
-    match = run_player_draft(keep_captains(ready_all(popped)))
+    match = to_champion_draft(popped)
     leaving = match.participants.filter(team="A", is_captain=False).first().player
     other = match.participants.filter(team="B", is_captain=False).first().player
     subs.request_sub_out(match.pk, captain_of(match, "B").player, other.pk)
@@ -1423,7 +1440,7 @@ def test_paused_board_drops_the_grid_and_fits_with_two_sub_requests(popped: Matc
 
 @pytest.mark.django_db
 def test_live_champion_board_still_fits_with_the_sub_button(popped: Match) -> None:
-    match = run_player_draft(keep_captains(ready_all(popped)))
+    match = to_champion_draft(popped)
     view = render_board(boards.board_state(match.pk))
     assert_within_limits(view)
     assert button_id("sub_open", match.pk) in str(view.to_components())
@@ -1492,7 +1509,7 @@ def test_sub_in_waiting_room_is_moved_to_their_teams_voice(wired: Community) -> 
     for player in players:
         queue.join(wired.pk, player)
     drain(gateway)
-    match = run_player_draft(keep_captains(ready_all(Match.objects.get())))
+    match = to_champion_draft(Match.objects.get())
     drain(gateway)
     leaving = match.participants.filter(team="B", is_captain=False).first().player
     sub = make_player(77)
@@ -1565,7 +1582,7 @@ def test_ready_dm_links_the_match_channel() -> None:
 def test_board_fits_with_the_most_sub_requests_allowed(popped: Match, phase: str) -> None:
     from league.services import subs
 
-    match = run_player_draft(keep_captains(ready_all(popped)))
+    match = to_champion_draft(popped)
     if phase == "in_progress":
         match = to_in_progress(match)
     team_a = list(match.participants.filter(team="A", is_captain=False).order_by("id"))
@@ -1576,3 +1593,82 @@ def test_board_fits_with_the_most_sub_requests_allowed(popped: Match, phase: str
     state = boards.board_state(match.pk)
     assert len(state.subs) == subs.MAX_PENDING
     assert_within_limits(render_board(state))
+
+
+# --- Vote, sides and the draft summary ---------------------------------------------------------
+
+
+def _views(match: Match) -> list[Any]:
+    state = boards.board_state(match.pk)
+    views = [render_board(state)]
+    picker = render_picker(state)
+    if picker is not None:
+        views.append(picker)
+    return views
+
+
+def _check(match: Match) -> list[dict[str, Any]]:
+    components: list[dict[str, Any]] = []
+    for view in _views(match):
+        assert_within_limits(view)
+        payload = view.to_components()
+        for custom_id in all_custom_ids(payload):
+            assert custom_id.split(":")[2] in registered_actions(), custom_id
+        components.extend(payload)
+    return components
+
+
+@pytest.mark.django_db
+def test_vote_board_has_a_two_choice_select(voting: Match, players: list[Player]) -> None:
+    lobby.cast_captain_votes(voting.pk, players[0], [players[1].pk])
+    text = str(_check(voting))
+    assert "1/12 voted" in text
+    assert "captain_vote" in text
+    assert "'max_values': 2" in text
+
+
+@pytest.mark.django_db
+def test_side_board_has_both_claim_buttons(voting: Match) -> None:
+    match = run_player_draft(vote_captains(voting))
+    labels = [button.get("label") for button in all_buttons(_check(match))]
+    assert "Become Hidden King captain" in labels
+    assert "Become Archmother captain" in labels
+
+
+@pytest.mark.django_db
+def test_champion_board_has_one_random_button(voting: Match) -> None:
+    labels = [button.get("label") for button in all_buttons(_check(to_champion_draft(voting)))]
+    assert labels.count("Random") == 1
+
+
+@pytest.mark.django_db
+def test_random_choice_is_marked_on_the_board(voting: Match) -> None:
+    match = to_champion_draft(voting)
+    draft_service.choose_random_champion(match.pk, acting_captain(match), match.step_index)
+    assert "🎲" in str(_check(fresh(match)))
+
+
+@pytest.mark.django_db
+def test_finished_draft_shows_its_name_gif_and_glhf(voting: Match) -> None:
+    from league.domain.engine import draft_name
+
+    match = to_champion_draft(voting)
+    for _ in range(16):
+        match = fresh(match)
+        draft_service.choose_random_champion(match.pk, acting_captain(match), match.step_index)
+    match = fresh(match)
+    assert match.status == Status.LOBBY_CODE
+    text = str(_check(match))
+    assert draft_name(match.rng_seed) in text
+    assert "GLHF" in text
+    assert "tenor.com" in text  # The GIF, from presets/draft_gifs.json.
+
+
+@pytest.mark.django_db
+def test_side_board_with_four_pending_subs_stays_within_limits(voting: Match) -> None:
+    from league.services import subs
+
+    match = run_player_draft(vote_captains(voting))
+    for leaving in match.participants.filter(is_captain=False, is_active=True)[:4]:
+        subs.request_sub_out(match.pk, leaving.player, leaving.player_id)
+    _check(fresh(match))

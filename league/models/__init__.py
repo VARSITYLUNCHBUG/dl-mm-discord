@@ -1,7 +1,6 @@
 from league.models.champions import Champion
 from league.models.community import Community
 from league.models.matches import (
-    CaptainHandoff,
     CaptainVote,
     DraftAction,
     Match,
@@ -19,7 +18,6 @@ from league.models.results import MatchResult, ResultSubmission
 from league.models.subs import SubOffer, SubRequest
 
 __all__ = [
-    "CaptainHandoff",
     "CaptainVote",
     "Champion",
     "Community",

@@ -14,7 +14,7 @@ class Team(models.TextChoices):
 
 class MatchStatus(models.TextChoices):
     READY_CHECK = S.READY_CHECK, "Ready check"
-    CAPTAIN_PHASE = S.CAPTAIN_PHASE, "Captains"
+    CAPTAIN_PHASE = S.CAPTAIN_PHASE, "Captain vote"
     PLAYER_DRAFT = S.PLAYER_DRAFT, "Player draft"
     SIDE_SELECT = S.SIDE_SELECT, "Choosing sides"
     CHAMPION_DRAFT = S.CHAMPION_DRAFT, "Champion draft"
@@ -90,7 +90,6 @@ class MatchParticipant(models.Model):
     ready_at = models.DateTimeField(null=True, blank=True)
     team = models.CharField(max_length=1, choices=Team.choices, blank=True)
     is_captain = models.BooleanField(default=False)
-    captain_confirmed_at = models.DateTimeField(null=True, blank=True)
     draft_pick_number = models.PositiveSmallIntegerField(null=True, blank=True)
     # True from joining until the match ends or the player is removed. Backs the hard guarantee
     # below that nobody can be in two live matches.
@@ -185,7 +184,7 @@ class DraftActionKind(models.TextChoices):
 
 
 class DraftAction(models.Model):
-    """Append-only record of each accepted draft step. A timed-out ban has no target."""
+    """Append-only record of each accepted draft step. A timed-out step takes a random target."""
 
     match = models.ForeignKey(Match, on_delete=models.PROTECT, related_name="draft_actions")
     step_index = models.PositiveSmallIntegerField()
@@ -250,47 +249,3 @@ class CaptainVote(models.Model):
 
     def __str__(self) -> str:
         return f"{self.voter_id} -> {self.candidate_id}"
-
-
-class HandoffStatus(models.TextChoices):
-    PENDING = "pending", "Pending"
-    ACCEPTED = "accepted", "Accepted"
-    DECLINED = "declined", "Declined"
-    EXPIRED = "expired", "Expired"
-
-
-class CaptainHandoff(models.Model):
-    """A captain's request to pass the role on. The budget is counted per team from these rows,
-    so a replacement inherits what is left rather than getting a fresh two."""
-
-    match = models.ForeignKey(Match, on_delete=models.PROTECT, related_name="handoffs")
-    team = models.CharField(max_length=1, choices=Team.choices)
-    from_player = models.ForeignKey("league.Player", on_delete=models.PROTECT, related_name="+")
-    to_player = models.ForeignKey("league.Player", on_delete=models.PROTECT, related_name="+")
-    status = models.CharField(
-        max_length=8, choices=HandoffStatus.choices, default=HandoffStatus.PENDING
-    )
-    deadline_at = models.DateTimeField()
-    created_at = models.DateTimeField()
-    resolved_at = models.DateTimeField(null=True, blank=True)
-
-    class Meta:
-        db_table = "captain_handoffs"
-        ordering = ("id",)
-        constraints = [
-            models.UniqueConstraint(
-                fields=("match", "team"),
-                condition=Q(status="pending"),
-                name="uniq_pending_handoff_per_team",
-            ),
-        ]
-        indexes = [
-            models.Index(
-                fields=("deadline_at",),
-                condition=Q(status="pending"),
-                name="handoff_pending_deadline_idx",
-            ),
-        ]
-
-    def __str__(self) -> str:
-        return f"{self.from_player_id} -> {self.to_player_id} ({self.status})"

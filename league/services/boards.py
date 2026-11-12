@@ -19,7 +19,6 @@ from league.models import (
     ResultSubmission,
     Season,
 )
-from league.models.matches import HandoffStatus
 from league.models.subs import UNRESOLVED, OfferSource, OfferStatus, SubRequest, SubStatus
 from league.services.common import mode_of, rating_of
 from league.services.gifs import draft_gifs
@@ -54,16 +53,6 @@ class PlayerLine:
     team: str = ""
     is_captain: bool = False
     is_ready: bool = False
-    confirmed_captain: bool = False
-
-
-@dataclass(frozen=True, slots=True)
-class HandoffLine:
-    id: int
-    team: str
-    from_name: str
-    to_name: str
-    to_discord_user_id: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,8 +98,6 @@ class BoardState:
     deadline_at: datetime | None
     step_index: int
     players: list[PlayerLine]
-    handoffs: list[HandoffLine] = field(default_factory=list)
-    handoffs_left: dict[str, int] = field(default_factory=dict)
     actions: list[DraftLine] = field(default_factory=list)
     acting_team: str = ""
     acting_captain_name: str = ""
@@ -135,15 +122,11 @@ class BoardState:
     # Who acts after this step, when it isn't more of the same.
     next_captain_name: str = ""
     next_action: str = ""
-    # The captain vote: whether this match votes, and who has voted so far.
-    captain_vote: bool = False
+    # Who has voted in the captain vote so far.
     voted_ids: frozenset[int] = frozenset()
-    # Bebot touches: a name for the draft, a GIF for its summary, and a Random button.
+    # The draft summary: a name for the draft and a GIF.
     draft_name: str = ""
     gif_url: str | None = None
-    random_button: bool = False
-    hidden_king_first: bool = False
-    ban_timeout_skips: bool = True
 
     @property
     def hold_until(self) -> datetime | None:
@@ -196,7 +179,6 @@ def board_state(match_id: int) -> BoardState:
                 team=participant.team,
                 is_captain=participant.is_captain,
                 is_ready=participant.ready_at is not None,
-                confirmed_captain=participant.captain_confirmed_at is not None,
             )
         )
     players.sort(key=lambda line: (-line.rating, line.name.lower()))
@@ -219,23 +201,6 @@ def board_state(match_id: int) -> BoardState:
         state.closes_at = match.ended_at + timedelta(minutes=TEXT_CHANNEL_GRACE_MINUTES)
     if match.lobby_code_host is not None:
         state.host_name = match.lobby_code_host.display_name
-
-    limit = mode.captains.handoff.requests_per_captain
-    for team in ("A", "B"):
-        state.handoffs_left[team] = limit - match.handoffs.filter(team=team).count()
-    pending = match.handoffs.filter(status=HandoffStatus.PENDING).select_related(
-        "from_player", "to_player"
-    )
-    state.handoffs = [
-        HandoffLine(
-            id=handoff.pk,
-            team=handoff.team,
-            from_name=handoff.from_player.display_name,
-            to_name=handoff.to_player.display_name,
-            to_discord_user_id=handoff.to_player.discord_user_id,
-        )
-        for handoff in pending
-    ]
 
     champion_names = dict(Champion.objects.values_list("pk", "name"))
     actions = match.draft_actions.select_related("target_player").order_by("step_index")
@@ -284,17 +249,13 @@ def board_state(match_id: int) -> BoardState:
         state.reported_by = report.captain.display_name
     if match.status == Status.COMPLETED:
         state.deltas = match_deltas(match)
-    state.captain_vote = mode.captains.selection == "vote"
-    if state.captain_vote and match.status == Status.CAPTAIN_PHASE:
+    if match.status == Status.CAPTAIN_PHASE:
         active = {line.player_id for line in players}
         state.voted_ids = frozenset(
             match.captain_votes.filter(voter_id__in=active).values_list("voter_id", flat=True)
         )
     state.draft_name = draft_name(match.rng_seed)
     state.gif_url = pick_gif(match.rng_seed, draft_gifs())
-    state.random_button = mode.champion_draft.random_button
-    state.hidden_king_first = mode.champion_draft.priority == "hidden_king_first"
-    state.ban_timeout_skips = mode.champion_draft.on_timeout.ban == "skip"
     state.on_hold = match.held_seconds is not None
     state.can_request_sub = match.status in SUBBABLE
     state.subs = _sub_lines(match)

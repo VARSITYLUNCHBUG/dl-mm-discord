@@ -1,4 +1,4 @@
-"""Lobby lifecycle before the draft: creation, ready check, captains, hand-offs, voids, subs."""
+"""Lobby lifecycle before the draft: creation, ready check, the captain vote, voids, subs."""
 
 from __future__ import annotations
 
@@ -15,13 +15,11 @@ from league.domain.engine import (
     CaptainCandidate,
     Status,
     first_pick_team,
-    select_captains,
     tally_captain_votes,
 )
-from league.domain.errors import InvalidAction, NotAllowed, StaleAction
-from league.domain.mode_schema import DraftMode, parse_mode
+from league.domain.errors import InvalidAction, StaleAction
+from league.domain.mode_schema import parse_mode
 from league.models import (
-    CaptainHandoff,
     CaptainVote,
     Champion,
     Community,
@@ -32,7 +30,7 @@ from league.models import (
     Player,
     QueueEntry,
 )
-from league.models.matches import HandoffStatus, RemovedReason, Source
+from league.models.matches import RemovedReason, Source
 from league.models.moderation import PenaltyKind
 from league.services import penalties
 from league.services.common import (
@@ -195,59 +193,18 @@ def on_ready_timeout(match: Match) -> None:
     render_queue(community)
 
 
-# --- Captains and hand-offs ------------------------------------------------------------------
-
-
-def begin_captain_phase(match: Match) -> None:
-    mode = mode_of(match)
-    if mode.captains.selection == "vote":
-        _begin_vote(match, mode)
-        return
-    participants = list(active_participants(match))
-    candidates = []
-    for participant in participants:
-        rating, games = rating_of(match.season, participant.player_id)
-        candidates.append(CaptainCandidate(participant.player_id, rating, games))
-    captain_a, captain_b = select_captains(
-        candidates, mode.captains.selection, mode.captains.min_games, match.rng_seed
-    )
-    for participant in participants:
-        if participant.player_id in {captain_a, captain_b}:
-            participant.is_captain = True
-            participant.team = "A" if participant.player_id == captain_a else "B"
-            participant.save(update_fields=["is_captain", "team"])
-
-    transition(
-        match,
-        Status.CAPTAIN_PHASE,
-        source=Source.SYSTEM,
-        deadline_at=seconds_from_now(mode.captains.phase_seconds),
-    )
-    save_transition(match)
-    if mode.captains.handoff.requests_per_captain == 0:
-        begin_player_draft(match, source=Source.SYSTEM)
-        return
-    _ping_captains(
-        match, "you're captain. You keep the role unless you hand it off before the timer ends."
-    )
-    render_board(match)
-
-
 # --- Captain vote ----------------------------------------------------------------------------
 
 VOTES_PER_PLAYER = 2
 
 
-def is_vote(match: Match) -> bool:
-    return mode_of(match).captains.selection == "vote"
-
-
-def _begin_vote(match: Match, mode: DraftMode) -> None:
+def begin_captain_phase(match: Match) -> None:
+    """Everyone is ready: open the captain vote."""
     transition(
         match,
         Status.CAPTAIN_PHASE,
         source=Source.SYSTEM,
-        deadline_at=seconds_from_now(mode.captains.phase_seconds),
+        deadline_at=seconds_from_now(mode_of(match).captains.vote_seconds),
     )
     save_transition(match)
     ids = [p.player.discord_user_id for p in active_participants(match)]
@@ -264,7 +221,7 @@ def _begin_vote(match: Match, mode: DraftMode) -> None:
 def cast_captain_votes(match_id: int, player: Player, candidate_ids: Sequence[int]) -> list[Player]:
     """Replace this player's captain votes. Returns who they voted for."""
     match = lock_match(match_id)
-    if match.status != Status.CAPTAIN_PHASE or not is_vote(match):
+    if match.status != Status.CAPTAIN_PHASE:
         raise StaleAction("The captain vote has finished.")
     require_not_on_hold(match)
     require_participant(match, player)
@@ -283,7 +240,7 @@ def cast_captain_votes(match_id: int, player: Player, candidate_ids: Sequence[in
         for candidate_id in chosen
     )
     bump(match)
-    _advance_vote(match, Source.USER)
+    advance_captain_phase(match)
     return [candidates[candidate_id] for candidate_id in chosen]
 
 
@@ -292,11 +249,17 @@ def _everyone_voted(match: Match) -> bool:
     return all(p.player_id in voters for p in active_participants(match))
 
 
-def _advance_vote(match: Match, source: str) -> None:
-    if on_hold(match) or not _everyone_voted(match):
+def advance_captain_phase(match: Match) -> None:
+    """Close the vote once everyone still in the lobby has voted."""
+    if on_hold(match) or not _everyone_voted(match):  # A sub picks it up again on arrival.
         render_board(match)
         return
-    _close_vote(match, source)
+    _close_vote(match, Source.USER)
+
+
+def on_captain_timeout(match: Match) -> None:
+    """Count the votes cast so far. Elo fills any gap."""
+    _close_vote(match, Source.TIMEOUT)
 
 
 def vote_counts(match: Match) -> dict[int, int]:
@@ -316,14 +279,12 @@ def _close_vote(match: Match, source: str) -> None:
         candidates.append(CaptainCandidate(participant.player_id, rating, games))
     counts = vote_counts(match)
     captain_a, captain_b = tally_captain_votes(counts, candidates, match.rng_seed)
-    moment = now()
     names = {}
     for participant in participants:
         if participant.player_id in {captain_a, captain_b}:
             participant.is_captain = True
             participant.team = "A" if participant.player_id == captain_a else "B"
-            participant.captain_confirmed_at = moment
-            participant.save(update_fields=["is_captain", "team", "captain_confirmed_at"])
+            participant.save(update_fields=["is_captain", "team"])
             names[participant.player_id] = participant.player.display_name
 
     def tally(player_id: int) -> str:
@@ -345,178 +306,11 @@ def _ping_captains(match: Match, text: str) -> None:
     add_effect(match.community, "ping", {"user_ids": ids, "text": text}, match=match)
 
 
-@transaction.atomic
-def keep_captaincy(match_id: int, player: Player) -> None:
-    match = lock_match(match_id)
-    if match.status != Status.CAPTAIN_PHASE:
-        raise StaleAction("The captain phase has already finished.")
-    require_not_on_hold(match)
-    participant = require_participant(match, player)
-    if not participant.is_captain:
-        raise NotAllowed("Only a captain can do that.")
-    if participant.captain_confirmed_at is None:
-        participant.captain_confirmed_at = now()
-        participant.save(update_fields=["captain_confirmed_at"])
-    bump(match)
-    _advance_captain_phase(match)
-
-
-def handoffs_used(match: Match, team: str) -> int:
-    return match.handoffs.filter(team=team).count()
-
-
-def handoff_candidates(match_id: int, captain: Player) -> list[Player]:
-    """Who this captain could ask. Checked again when the request is made."""
-    match = Match.objects.filter(pk=match_id).first()
-    if match is None or match.status != Status.CAPTAIN_PHASE:
-        raise StaleAction("Hand-offs are closed: the draft has started.")
-    participant = require_participant(match, captain)
-    if not participant.is_captain:
-        raise NotAllowed("Only a captain can request a hand-off.")
-    if participant.captain_confirmed_at is not None:
-        raise InvalidAction("You've already chosen to keep the role.")
-    limit = mode_of(match).captains.handoff.requests_per_captain
-    if handoffs_used(match, participant.team) >= limit:
-        raise InvalidAction(f"You've used all {limit} hand-off requests.")
-    others = active_participants(match).filter(is_captain=False).order_by("id")
-    return [other.player for other in others]
-
-
-@transaction.atomic
-def request_handoff(match_id: int, captain: Player, target_player_id: int) -> CaptainHandoff:
-    """Only a captain can start this, up to the mode's limit per team. The target must accept."""
-    match = lock_match(match_id)
-    if match.status != Status.CAPTAIN_PHASE:
-        raise StaleAction("Hand-offs are closed: the draft has started.")
-    require_not_on_hold(match)
-    participant = require_participant(match, captain)
-    if not participant.is_captain:
-        raise NotAllowed("Only a captain can request a hand-off.")
-    if participant.captain_confirmed_at is not None:
-        raise InvalidAction("You've already chosen to keep the role.")
-    mode = mode_of(match)
-    limit = mode.captains.handoff.requests_per_captain
-    if handoffs_used(match, participant.team) >= limit:
-        raise InvalidAction(f"You've used all {limit} hand-off requests.")
-    if match.handoffs.filter(team=participant.team, status=HandoffStatus.PENDING).exists():
-        raise InvalidAction("You already have a request waiting for an answer.")
-    target = match.participants.filter(player_id=target_player_id, is_active=True).first()
-    if target is None:
-        raise InvalidAction("That player isn't in this lobby.")
-    if target.is_captain:
-        raise InvalidAction("That player is already a captain.")
-
-    deadline = seconds_from_now(mode.captains.handoff.accept_seconds)
-    handoff = CaptainHandoff.objects.create(
-        match=match,
-        team=participant.team,
-        from_player=captain,
-        to_player_id=target_player_id,
-        deadline_at=deadline,
-        created_at=now(),
-    )
-    if match.deadline_at is None or match.deadline_at < deadline:
-        match.deadline_at = deadline
-    bump(match, "deadline_at")
-    add_effect(
-        match.community,
-        "ping",
-        {
-            "user_ids": [target.player.discord_user_id],
-            "text": f"{captain.display_name} wants to hand you the captaincy. "
-            "Accept or decline on the board.",
-        },
-        match=match,
-    )
-    render_board(match)
-    return handoff
-
-
-@transaction.atomic
-def respond_handoff(handoff_id: int, player: Player, accept: bool) -> None:
-    handoff = CaptainHandoff.objects.filter(pk=handoff_id).first()
-    if handoff is None:
-        raise StaleAction("That request no longer exists.")
-    match = lock_match(handoff.match_id)
-    handoff.refresh_from_db()
-    if handoff.status != HandoffStatus.PENDING or match.status != Status.CAPTAIN_PHASE:
-        raise StaleAction("That request has already been resolved.")
-    if handoff.to_player_id != player.pk:
-        raise NotAllowed("This request isn't for you.")
-    require_not_on_hold(match)
-    _resolve_handoff(match, handoff, HandoffStatus.ACCEPTED if accept else HandoffStatus.DECLINED)
-
-
-def expire_handoff(handoff: CaptainHandoff) -> None:
-    match = lock_match(handoff.match_id)
-    handoff.refresh_from_db()
-    if handoff.status == HandoffStatus.PENDING:
-        _resolve_handoff(match, handoff, HandoffStatus.EXPIRED)
-
-
-def _resolve_handoff(match: Match, handoff: CaptainHandoff, status: str) -> None:
-    moment = now()
-    handoff.status = status
-    handoff.resolved_at = moment
-    handoff.save(update_fields=["status", "resolved_at"])
-    if status == HandoffStatus.ACCEPTED:
-        old = match.participants.get(player_id=handoff.from_player_id)
-        old.is_captain = False
-        old.team = ""
-        old.captain_confirmed_at = None
-        old.save(update_fields=["is_captain", "team", "captain_confirmed_at"])
-        new = match.participants.get(player_id=handoff.to_player_id)
-        new.is_captain = True
-        new.team = handoff.team
-        new.captain_confirmed_at = moment  # Accepting is the new captain's confirmation.
-        new.save(update_fields=["is_captain", "team", "captain_confirmed_at"])
-    bump(match)
-    _advance_captain_phase(match)
-
-
-def advance_captain_phase(match: Match) -> None:
-    """Start the player draft once both captains are settled."""
-    _advance_captain_phase(match)
-
-
-def _advance_captain_phase(match: Match) -> None:
-    if on_hold(match):  # Picks up again when the sub arrives.
-        render_board(match)
-        return
-    if is_vote(match):
-        _advance_vote(match, Source.USER)
-        return
-    pending = match.handoffs.filter(status=HandoffStatus.PENDING).exists()
-    waiting = active_participants(match).filter(is_captain=True, captain_confirmed_at__isnull=True)
-    if not pending and not waiting.exists():
-        begin_player_draft(match, source=Source.USER)
-    else:
-        render_board(match)
-
-
-def on_captain_timeout(match: Match) -> None:
-    """Silence keeps the role, unless a hand-off is still waiting on its own 30 seconds.
-
-    In a vote, the votes cast so far are counted and Elo fills any gap.
-    """
-    if is_vote(match):
-        _close_vote(match, Source.TIMEOUT)
-        return
-    pending = match.handoffs.filter(status=HandoffStatus.PENDING).order_by("-deadline_at").first()
-    if pending is not None:
-        match.deadline_at = pending.deadline_at
-        bump(match, "deadline_at")
-        return
-    begin_player_draft(match, source=Source.TIMEOUT)
-
-
 def begin_player_draft(match: Match, source: str) -> None:
     mode = mode_of(match)
     rating_a, _ = rating_of(match.season, captain_of(match, "A").player_id)
     rating_b, _ = rating_of(match.season, captain_of(match, "B").player_id)
-    match.player_first_pick = first_pick_team(
-        mode.captains.first_pick, rating_a, rating_b, match.rng_seed
-    )
+    match.player_first_pick = first_pick_team(rating_a, rating_b, match.rng_seed)
     match.step_index = 0
     transition(
         match,
@@ -562,9 +356,6 @@ def void_live(
         actor=actor,
         reason=reason[:500],
         created_at=moment,
-    )
-    match.handoffs.filter(status=HandoffStatus.PENDING).update(
-        status=HandoffStatus.EXPIRED, resolved_at=moment
     )
     active = list(active_participants(match))
     if requeue:
@@ -629,7 +420,6 @@ def swap_player(match: Match, leaving: MatchParticipant, in_player: Player, *, r
         ready_at=moment if ready else None,
         team=leaving.team,
         is_captain=leaving.is_captain,
-        captain_confirmed_at=leaving.captain_confirmed_at,
         draft_pick_number=leaving.draft_pick_number,
     )
     leaving.is_active = False
@@ -637,10 +427,6 @@ def swap_player(match: Match, leaving: MatchParticipant, in_player: Player, *, r
     leaving.removed_reason = RemovedReason.SUBBED_OUT
     leaving.removed_at = moment
     leaving.save(update_fields=["is_active", "is_captain", "removed_reason", "removed_at"])
-    # A hand-off to or from them can't complete now. The sub inherits the role instead.
-    match.handoffs.filter(status=HandoffStatus.PENDING).filter(
-        Q(from_player_id=leaving.player_id) | Q(to_player_id=leaving.player_id)
-    ).update(status=HandoffStatus.EXPIRED, resolved_at=moment)
     # Their votes, and votes for them, no longer count. The sub gets a vote of their own.
     match.captain_votes.filter(
         Q(voter_id=leaving.player_id) | Q(candidate_id=leaving.player_id)

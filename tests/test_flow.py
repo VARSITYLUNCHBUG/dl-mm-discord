@@ -10,6 +10,8 @@ from django.db import IntegrityError, transaction
 from league.domain.engine import Status
 from league.domain.errors import InvalidAction, NotAllowed, StaleAction
 from league.models import (
+    CaptainVote,
+    Champion,
     Community,
     DraftAction,
     Match,
@@ -23,18 +25,30 @@ from league.models import (
     ResultSubmission,
 )
 from league.models.outbox import EffectStatus
-from league.services import deadlines, dev, draft, integrity, lobby, queue, ratings, results
+from league.services import (
+    champions,
+    deadlines,
+    dev,
+    draft,
+    integrity,
+    lobby,
+    queue,
+    ratings,
+    results,
+)
 from league.services.common import captain_of
-from tests.conftest import Clock, make_player
+from tests.conftest import PRESETS, Clock, activate, make_player
 from tests.helpers import (
+    acting_captain,
     finish,
     fresh,
     image,
-    keep_captains,
     ready_all,
     run_champion_draft,
     run_player_draft,
+    to_champion_draft,
     to_in_progress,
+    vote_captains,
 )
 
 pytestmark = pytest.mark.django_db
@@ -125,10 +139,11 @@ def test_ready_deadline_is_180_seconds(popped: Match) -> None:
     assert 179 <= remaining <= 181
 
 
-def test_all_ready_moves_to_captain_phase(popped: Match) -> None:
-    match = ready_all(popped)
-    assert match.status == Status.CAPTAIN_PHASE
-    assert match.participants.filter(is_captain=True).count() == 2
+def test_all_ready_opens_a_captain_vote_with_no_captains(voting: Match) -> None:
+    assert voting.status == Status.CAPTAIN_PHASE
+    assert not voting.participants.filter(is_captain=True).exists()
+    opened = voting.transitions.get(to_status=Status.CAPTAIN_PHASE).created_at
+    assert 44 <= (voting.deadline_at - opened).total_seconds() <= 46
 
 
 def test_stranger_cannot_ready(popped: Match) -> None:
@@ -209,127 +224,89 @@ def test_penalty_ladder_escalates(
     assert (second.expires_at - second.starts_at).total_seconds() == 15 * 60
 
 
-# --- Captains ------------------------------------------------------------------------------
+# --- Captain vote --------------------------------------------------------------------------
 
 
 def seed(match: Match, player: Player, rating: int) -> None:
     ratings.seed_player(match.season, player, rating, actor=None)
 
 
-def test_highest_elo_become_captains(popped: Match, players: list[Player]) -> None:
-    seed(popped, players[4], 1500)
-    seed(popped, players[7], 1400)
-    match = ready_all(popped)
+def test_voting_again_replaces_your_votes(voting: Match, players: list[Player]) -> None:
+    lobby.cast_captain_votes(voting.pk, players[0], [players[1].pk, players[2].pk])
+    lobby.cast_captain_votes(voting.pk, players[0], [players[3].pk])
+    votes = CaptainVote.objects.filter(match=voting, voter=players[0])
+    assert list(votes.values_list("candidate_id", flat=True)) == [players[3].pk]
+
+
+def test_you_can_vote_for_yourself(voting: Match, players: list[Player]) -> None:
+    chosen = lobby.cast_captain_votes(voting.pk, players[0], [players[0].pk])
+    assert chosen == [players[0]]
+
+
+def test_three_votes_are_refused(voting: Match, players: list[Player]) -> None:
+    with pytest.raises(InvalidAction, match="up to 2"):
+        lobby.cast_captain_votes(voting.pk, players[0], [p.pk for p in players[1:4]])
+
+
+def test_voting_for_someone_outside_the_lobby_is_refused(
+    voting: Match, players: list[Player]
+) -> None:
+    outsider = make_player(99)
+    with pytest.raises(InvalidAction, match="in this lobby"):
+        lobby.cast_captain_votes(voting.pk, players[0], [outsider.pk])
+
+
+def test_someone_outside_the_lobby_cannot_vote(voting: Match, players: list[Player]) -> None:
+    with pytest.raises(InvalidAction, match="not in this match"):
+        lobby.cast_captain_votes(voting.pk, make_player(99), [players[0].pk])
+
+
+def test_last_vote_closes_the_vote_and_starts_the_player_draft(
+    voting: Match, players: list[Player]
+) -> None:
+    for voter in players:
+        lobby.cast_captain_votes(voting.pk, voter, [players[4].pk, players[7].pk])
+    match = fresh(voting)
+    assert match.status == Status.PLAYER_DRAFT
+    captains = set(match.participants.filter(is_captain=True).values_list("player_id", flat=True))
+    assert captains == {players[4].pk, players[7].pk}
+    with pytest.raises(StaleAction):
+        lobby.cast_captain_votes(match.pk, players[0], [players[1].pk])
+
+
+def test_an_empty_vote_makes_the_highest_elo_captains(
+    voting: Match, players: list[Player], clock: Clock
+) -> None:
+    seed(voting, players[4], 1500)
+    seed(voting, players[7], 1400)
+    clock.advance(46)
+    deadlines.tick()
+    match = fresh(voting)
+    assert match.status == Status.PLAYER_DRAFT
     assert captain_of(match, "A").player == players[4]
     assert captain_of(match, "B").player == players[7]
 
 
-def non_captain(match: Match) -> Player:
-    return match.participants.filter(is_captain=False, is_active=True).first().player
-
-
-def test_only_a_captain_can_request_handoff(popped: Match) -> None:
-    match = ready_all(popped)
-    other = non_captain(match)
-    with pytest.raises(NotAllowed, match="Only a captain"):
-        lobby.request_handoff(match.pk, other, captain_of(match, "A").player_id)
-
-
-def test_accepted_handoff_replaces_captain(popped: Match) -> None:
-    match = ready_all(popped)
-    old = captain_of(match, "A").player
-    new = non_captain(match)
-    handoff = lobby.request_handoff(match.pk, old, new.pk)
-    assert captain_of(fresh(match), "A").player == old  # Nothing changes until they accept.
-    lobby.respond_handoff(handoff.pk, new, accept=True)
-    match = fresh(match)
-    assert captain_of(match, "A").player == new
-    old_row = match.participants.get(player=old)
-    assert not old_row.is_captain
-    assert old_row.team == ""  # Back in the draft pool.
-
-
-def test_only_the_target_can_answer(popped: Match) -> None:
-    match = ready_all(popped)
-    target = non_captain(match)
-    handoff = lobby.request_handoff(match.pk, captain_of(match, "A").player, target.pk)
-    with pytest.raises(NotAllowed):
-        lobby.respond_handoff(handoff.pk, captain_of(match, "B").player, accept=True)
-
-
-def test_two_requests_limit_counts_declines(popped: Match) -> None:
-    match = ready_all(popped)
-    captain = captain_of(match, "A").player
-    others = list(match.participants.filter(is_captain=False)[:3])
-    for participant in others[:2]:
-        handoff = lobby.request_handoff(match.pk, captain, participant.player_id)
-        lobby.respond_handoff(handoff.pk, participant.player, accept=False)
-    assert captain_of(fresh(match), "A").player == captain
-    with pytest.raises(InvalidAction, match="all 2"):
-        lobby.request_handoff(match.pk, captain, others[2].player_id)
-
-
-def test_replacement_inherits_remaining_requests(popped: Match) -> None:
-    match = ready_all(popped)
-    captain = captain_of(match, "A").player
-    others = list(match.participants.filter(is_captain=False)[:3])
-    declined = lobby.request_handoff(match.pk, captain, others[0].player_id)
-    lobby.respond_handoff(declined.pk, others[0].player, accept=False)
-    accepted = lobby.request_handoff(match.pk, captain, others[1].player_id)
-    lobby.respond_handoff(accepted.pk, others[1].player, accept=True)
-    # The new captain accepted, so is confirmed, and team A's budget is spent.
-    assert lobby.handoffs_used(fresh(match), "A") == 2
-
-
-def test_cannot_hand_off_to_other_captain(popped: Match) -> None:
-    match = ready_all(popped)
-    with pytest.raises(InvalidAction, match="already a captain"):
-        lobby.request_handoff(
-            match.pk, captain_of(match, "A").player, captain_of(match, "B").player_id
-        )
-
-
-def test_expired_handoff_uses_a_request_and_keeps_captain(popped: Match, clock: Clock) -> None:
-    match = ready_all(popped)
-    captain = captain_of(match, "A").player
-    lobby.request_handoff(match.pk, captain, non_captain(match).pk)
-    clock.advance(31)
+def test_vote_timeout_counts_votes_and_elo_fills_the_gap(
+    voting: Match, players: list[Player], clock: Clock
+) -> None:
+    seed(voting, players[9], 1500)
+    lobby.cast_captain_votes(voting.pk, players[0], [players[2].pk])
+    lobby.cast_captain_votes(voting.pk, players[1], [players[2].pk])
+    clock.advance(46)
     deadlines.tick()
-    match = fresh(match)
-    assert lobby.handoffs_used(match, "A") == 1
+    match = fresh(voting)
     assert match.status == Status.PLAYER_DRAFT
-    assert captain_of(match, "A").player == captain
+    assert captain_of(match, "A").player_id == players[2].pk
+    assert captain_of(match, "B").player_id == players[9].pk
 
 
-def test_captain_phase_timeout_keeps_originals(popped: Match, clock: Clock) -> None:
-    match = ready_all(popped)
-    captain_a = captain_of(match, "A").player
-    clock.advance(31)
-    deadlines.tick()
-    match = fresh(match)
-    assert match.status == Status.PLAYER_DRAFT
-    assert captain_of(match, "A").player == captain_a
-
-
-def test_pending_handoff_outlives_phase_deadline(popped: Match, clock: Clock) -> None:
-    match = ready_all(popped)
-    lobby.keep_captaincy(match.pk, captain_of(match, "B").player)
-    clock.advance(15)
-    target = non_captain(match)
-    handoff = lobby.request_handoff(match.pk, captain_of(match, "A").player, target.pk)
-    clock.advance(6)  # The phase's own 20 seconds have passed; the request has 24 left.
-    deadlines.tick()
-    assert fresh(match).status == Status.CAPTAIN_PHASE
-    lobby.respond_handoff(handoff.pk, target, accept=True)
-    match = fresh(match)
-    assert match.status == Status.PLAYER_DRAFT
-    assert captain_of(match, "A").player == target
-
-
-def test_handoff_closed_once_draft_starts(popped: Match) -> None:
-    match = keep_captains(ready_all(popped))
-    with pytest.raises(StaleAction):
-        lobby.request_handoff(match.pk, captain_of(match, "A").player, non_captain(match).pk)
+def test_vote_result_is_announced_after_the_transition(voting: Match) -> None:
+    match = vote_captains(voting)
+    kinds = list(OutboxEffect.objects.filter(match=match).values_list("kind", flat=True))
+    announce = max(i for i, kind in enumerate(kinds) if kind == "ping_lobby")
+    cleared = max(i for i, kind in enumerate(kinds) if kind == "clear_notices")
+    assert announce > cleared
 
 
 # --- Player draft --------------------------------------------------------------------------
@@ -338,27 +315,14 @@ def test_handoff_closed_once_draft_starts(popped: Match) -> None:
 def test_lower_rated_captain_gets_first_pick(popped: Match, players: list[Player]) -> None:
     seed(popped, players[0], 1500)
     seed(popped, players[1], 1400)
-    match = keep_captains(ready_all(popped))
+    match = vote_captains(ready_all(popped))
     assert captain_of(match, "B").player == players[1]
     assert match.player_first_pick == "B"
 
 
-def test_first_pick_recomputed_after_handoff(popped: Match, players: list[Player]) -> None:
-    seed(popped, players[0], 1500)
-    seed(popped, players[1], 1400)
-    seed(popped, players[2], 1100)
-    match = ready_all(popped)
-    handoff = lobby.request_handoff(match.pk, players[0], players[2].pk)
-    lobby.respond_handoff(handoff.pk, players[2], accept=True)
-    lobby.keep_captaincy(match.pk, players[1])
-    match = fresh(match)
-    assert captain_of(match, "A").player == players[2]
-    assert match.player_first_pick == "A"  # Now team A's captain is the lower rated.
-
-
 def test_draft_produces_two_full_teams(popped: Match) -> None:
-    match = run_player_draft(keep_captains(ready_all(popped)))
-    assert match.status == Status.CHAMPION_DRAFT
+    match = run_player_draft(vote_captains(ready_all(popped)))
+    assert match.status == Status.SIDE_SELECT
     assert match.participants.filter(team="A").count() == 6
     assert match.participants.filter(team="B").count() == 6
     actions = list(DraftAction.objects.filter(match=match, action="player_pick"))
@@ -368,7 +332,7 @@ def test_draft_produces_two_full_teams(popped: Match) -> None:
 
 
 def test_pick_order_is_snake(popped: Match) -> None:
-    match = run_player_draft(keep_captains(ready_all(popped)))
+    match = run_player_draft(vote_captains(ready_all(popped)))
     first = match.player_first_pick
     second = "B" if first == "A" else "A"
     teams = "".join(
@@ -380,7 +344,7 @@ def test_pick_order_is_snake(popped: Match) -> None:
 
 
 def test_wrong_captain_cannot_pick(popped: Match) -> None:
-    match = keep_captains(ready_all(popped))
+    match = vote_captains(ready_all(popped))
     second = "B" if match.player_first_pick == "A" else "A"
     target = match.participants.filter(team="").first()
     with pytest.raises(NotAllowed):
@@ -388,7 +352,7 @@ def test_wrong_captain_cannot_pick(popped: Match) -> None:
 
 
 def test_double_click_is_stale_and_changes_nothing(popped: Match) -> None:
-    match = keep_captains(ready_all(popped))
+    match = vote_captains(ready_all(popped))
     captain = captain_of(match, match.player_first_pick).player
     target = match.participants.filter(team="").first()
     draft.pick_player(match.pk, captain, 0, target.player_id, interaction_id=1)
@@ -400,7 +364,7 @@ def test_double_click_is_stale_and_changes_nothing(popped: Match) -> None:
 
 
 def test_cannot_pick_already_drafted_player(popped: Match) -> None:
-    match = keep_captains(ready_all(popped))
+    match = vote_captains(ready_all(popped))
     captain = captain_of(match, match.player_first_pick).player
     target = match.participants.filter(team="").first()
     draft.pick_player(match.pk, captain, 0, target.player_id)
@@ -416,7 +380,7 @@ def test_player_pick_timeout_takes_highest_rated(
     seed(popped, players[0], 1500)
     seed(popped, players[1], 1400)
     seed(popped, players[5], 1300)
-    match = keep_captains(ready_all(popped))
+    match = vote_captains(ready_all(popped))
     clock.advance(46)
     deadlines.tick()
     action = DraftAction.objects.get(match=match, step_index=0)
@@ -424,84 +388,178 @@ def test_player_pick_timeout_takes_highest_rated(
     assert action.target_player == players[5]
 
 
+# --- Side claim ----------------------------------------------------------------------------
+
+
+def at_side_select(voting: Match) -> Match:
+    return run_player_draft(vote_captains(voting))
+
+
+def test_player_draft_ends_at_the_side_claim(voting: Match) -> None:
+    match = at_side_select(voting)
+    assert match.status == Status.SIDE_SELECT
+    assert match.hidden_king_team == ""
+
+
+def test_first_claim_decides_both_sides_and_hidden_king_goes_first(voting: Match) -> None:
+    match = at_side_select(voting)
+    draft.claim_side(match.pk, captain_of(match, "B").player, "hk")
+    match = fresh(match)
+    assert match.status == Status.CHAMPION_DRAFT
+    assert match.hidden_king_team == "B"
+    assert match.champion_first_pick == "B"
+    with pytest.raises(StaleAction):
+        draft.claim_side(match.pk, captain_of(match, "A").player, "hk")
+
+
+def test_claiming_archmother_gives_the_other_team_hidden_king(voting: Match) -> None:
+    match = at_side_select(voting)
+    draft.claim_side(match.pk, captain_of(match, "B").player, "am")
+    match = fresh(match)
+    assert match.hidden_king_team == "A"
+    assert match.champion_first_pick == "A"
+
+
+def test_only_a_captain_can_claim_a_side(voting: Match) -> None:
+    match = at_side_select(voting)
+    player = match.participants.filter(is_captain=False).first().player
+    with pytest.raises(NotAllowed):
+        draft.claim_side(match.pk, player, "hk")
+
+
+def test_side_claim_timeout_flips_a_coin(voting: Match, clock: Clock) -> None:
+    match = at_side_select(voting)
+    clock.advance(21)
+    deadlines.tick()
+    match = fresh(match)
+    assert match.status == Status.CHAMPION_DRAFT
+    assert match.hidden_king_team in {"A", "B"}
+    assert match.champion_first_pick == match.hidden_king_team
+
+
 # --- Champion draft ------------------------------------------------------------------------
 
 
-def champion_ready(popped: Match) -> Match:
-    return run_player_draft(keep_captains(ready_all(popped)))
-
-
-def test_champion_draft_runs_18_steps_to_lobby_code(popped: Match) -> None:
-    match = run_champion_draft(champion_ready(popped))
+@pytest.mark.parametrize(
+    ("slug", "steps", "bans", "seconds"),
+    [("bebot_2ban", 16, 4, 40), ("dcs_s3_2ban", 16, 4, 30), ("threeban_1win_2026", 18, 6, 30)],
+)
+def test_every_preset_runs_the_same_flow(
+    league: Community, players: list[Player], slug: str, steps: int, bans: int, seconds: int
+) -> None:
+    activate(league, slug)
+    for player in players:
+        queue.join(league.pk, player)
+    match = to_champion_draft(Match.objects.get())
+    assert match.mode_version.slug == slug
+    opened = match.transitions.get(to_status=Status.CHAMPION_DRAFT).created_at
+    assert seconds - 1 <= (match.deadline_at - opened).total_seconds() <= seconds + 1
+    hidden_king = match.hidden_king_team
+    assert acting_captain(match) == captain_of(match, hidden_king).player
+    draft.choose_random_champion(match.pk, acting_captain(match), match.step_index)
+    match = run_champion_draft(match)
     assert match.status == Status.LOBBY_CODE
+    statuses = list(match.transitions.order_by("id").values_list("to_status", flat=True))
+    assert statuses[-5:] == [
+        Status.CAPTAIN_PHASE,
+        Status.PLAYER_DRAFT,
+        Status.SIDE_SELECT,
+        Status.CHAMPION_DRAFT,
+        Status.LOBBY_CODE,
+    ]
+    assert match.champion_first_pick == hidden_king
     actions = DraftAction.objects.filter(match=match).exclude(action="player_pick")
-    assert actions.count() == 18
-    assert actions.filter(action="ban").count() == 6
+    assert actions.count() == steps
+    assert actions.filter(action="ban").count() == bans
     assert actions.filter(action="pick", team="A").count() == 6
     assert actions.filter(action="pick", team="B").count() == 6
+    assert actions.order_by("step_index").first().team == hidden_king
+    assert actions.filter(random_choice=True).count() == 1
     assert match.lobby_code_host_id in match.participants.filter(is_captain=True).values_list(
         "player_id", flat=True
     )
-    assert match.hidden_king_team in {"A", "B"}
 
 
 def test_banned_champion_cannot_be_picked(popped: Match) -> None:
-    from league.domain.draft_plan import build_plan, team_for_role
-    from league.services.common import mode_of
-
-    match = champion_ready(popped)
-    plan = build_plan(mode_of(match))
-    team = team_for_role(plan[match.step_index].role, match.champion_first_pick)
+    match = to_champion_draft(popped)
     champion = draft.available_champions(match)[0]
-    draft.choose_champion(match.pk, captain_of(match, team).player, match.step_index, champion)
+    draft.choose_champion(match.pk, acting_captain(match), match.step_index, champion)
     match = fresh(match)
-    team = team_for_role(plan[match.step_index].role, match.champion_first_pick)
     with pytest.raises(InvalidAction, match="isn't available"):
-        draft.choose_champion(match.pk, captain_of(match, team).player, match.step_index, champion)
+        draft.choose_champion(match.pk, acting_captain(match), match.step_index, champion)
 
 
 def test_disabled_champion_is_not_in_the_pool(league: Community, players: list[Player]) -> None:
-    from league.models import Champion
-
     Champion.objects.filter(pk=1).update(is_enabled=False)
     for player in players:
         queue.join(league.pk, player)
     assert 1 not in Match.objects.get().champion_pool
 
 
-def test_ban_timeout_skips_and_pick_timeout_randomises(popped: Match, clock: Clock) -> None:
-    match = champion_ready(popped)
-    for _ in range(18):
-        clock.advance(31)
+def test_timeouts_take_a_random_champion_for_bans_and_picks(popped: Match, clock: Clock) -> None:
+    match = to_champion_draft(popped)
+    for _ in range(16):
+        clock.advance(41)
         deadlines.tick()
     match = fresh(match)
     assert match.status == Status.LOBBY_CODE
     bans = DraftAction.objects.filter(match=match, action="ban")
-    assert bans.count() == 6
-    assert all(ban.target_champion is None for ban in bans)
+    assert bans.count() == 4
+    assert all(ban.target_champion_id is not None for ban in bans)
+    assert all(ban.source == "timeout" for ban in bans)
     picks = DraftAction.objects.filter(match=match, action="pick")
     assert picks.count() == 12
     assert picks.values("target_champion").distinct().count() == 12
+
+
+def test_random_button_takes_an_available_champion(popped: Match) -> None:
+    match = to_champion_draft(popped)
+    available = draft.available_champions(match)
+    champion = draft.choose_random_champion(match.pk, acting_captain(match), match.step_index)
+    assert champion in available
+    action = DraftAction.objects.get(match=match, step_index=match.step_index)
+    assert action.random_choice
+    assert action.source == "user"
+    assert action.target_champion_id == champion
+    assert fresh(match).step_index == match.step_index + 1
+
+
+def test_random_button_refuses_the_wrong_captain_and_a_stale_step(popped: Match) -> None:
+    match = to_champion_draft(popped)
+    waiting = captain_of(match, "B" if match.champion_first_pick == "A" else "A").player
+    with pytest.raises(NotAllowed):
+        draft.choose_random_champion(match.pk, waiting, match.step_index)
+    draft.choose_random_champion(match.pk, acting_captain(match), match.step_index)
+    with pytest.raises(StaleAction):
+        draft.choose_random_champion(match.pk, acting_captain(fresh(match)), match.step_index)
+
+
+def test_bebot_emojis_load_onto_champions(league: Community) -> None:
+    result = champions.load_emojis(PRESETS / "champion_emojis.yaml")
+    assert not result.unknown
+    assert Champion.objects.get(name="Abrams").discord_emoji_id == 1302512783283191879
+    again = champions.load_emojis(PRESETS / "champion_emojis.yaml")
+    assert not again.updated
 
 
 # --- Lobby code ----------------------------------------------------------------------------
 
 
 def test_only_host_can_submit_code(popped: Match) -> None:
-    match = run_champion_draft(champion_ready(popped))
+    match = run_champion_draft(to_champion_draft(popped))
     other = match.participants.filter(is_captain=True).exclude(player=match.lobby_code_host).first()
     with pytest.raises(NotAllowed):
         draft.submit_lobby_code(match.pk, other.player, "ABC123")
 
 
 def test_bad_code_rejected(popped: Match) -> None:
-    match = run_champion_draft(champion_ready(popped))
+    match = run_champion_draft(to_champion_draft(popped))
     with pytest.raises(InvalidAction):
         draft.submit_lobby_code(match.pk, match.lobby_code_host, "<@everyone>")
 
 
 def test_code_timeout_passes_to_other_captain_then_voids(popped: Match, clock: Clock) -> None:
-    match = run_champion_draft(champion_ready(popped))
+    match = run_champion_draft(to_champion_draft(popped))
     first_host = match.lobby_code_host_id
     clock.advance(181)
     deadlines.tick()
@@ -730,6 +788,7 @@ def test_dev_autoplay_plays_a_whole_match(league: Community, settings) -> None:
     assert match.pk != first.pk
     assert match.status == Status.COMPLETED
     assert match.winner == "B"
-    assert match.handoffs.filter(status="declined").count() == 1
-    assert match.handoffs.filter(status="accepted").count() == 1
+    assert CaptainVote.objects.filter(match=match).exists()
+    assert match.transitions.filter(to_status=Status.SIDE_SELECT).exists()
+    assert match.champion_first_pick == match.hidden_king_team
     assert integrity.check_all() == []

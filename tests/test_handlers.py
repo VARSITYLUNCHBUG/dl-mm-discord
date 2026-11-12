@@ -29,8 +29,16 @@ from league.domain.errors import InvalidAction
 from league.models import Community, DraftModeVersion, Match, Player, QueueEntry, ResultSubmission
 from league.services import community, integrity, queue, ratings
 from league.services.common import captain_of, open_season
-from tests.conftest import make_player
-from tests.helpers import fresh, keep_captains, ready_all, run_champion_draft, run_player_draft
+from tests.conftest import make_player, publish_presets
+from tests.helpers import (
+    acting_captain,
+    fresh,
+    ready_all,
+    run_champion_draft,
+    run_player_draft,
+    to_champion_draft,
+    vote_captains,
+)
 
 GUILD_ID = 999
 ARCHIVE_CHANNEL = 7004
@@ -42,14 +50,7 @@ pytestmark = pytest.mark.django_db(transaction=True)
 
 @pytest.fixture
 def wired(transactional_db: None) -> Iterator[Community]:
-    from django.conf import settings
-
-    from league.services import champions, modes
-
-    presets = settings.BASE_DIR / "presets"
-    champions.seed_from_file(presets / "champions.yaml")
-    for name in ("threeban_1win_2026.yaml", "dcs_s3_2ban.yaml"):
-        modes.publish(modes.load_yaml(presets / name))
+    publish_presets()
     row = community.ensure(guild_id=GUILD_ID, name="Test")
     community.save_wiring(row.pk, archive_channel_id=ARCHIVE_CHANNEL)
     row.refresh_from_db()
@@ -226,49 +227,44 @@ def test_ready_button_works_in_guild_and_dm(wired: Community) -> None:
     assert "You're ready" in replies(dm)[0]
 
 
-def test_handoff_buttons_full_journey(wired: Community) -> None:
-    match, _players = lobby_of_twelve(wired)
+def test_captain_vote_select(wired: Community) -> None:
+    match, players = lobby_of_twelve(wired)
     match = ready_all(match)
-    captain = captain_of(match, "A").player
-    target = match.participants.filter(is_captain=False).first().player
+    interaction = fake_interaction(players[0])
+    click(interaction, "captain_vote", match.pk, values=(str(players[3].pk), str(players[5].pk)))
+    assert "You voted for" in replies(interaction)[0]
+    assert players[3].display_name in replies(interaction)[0]
+    assert match.captain_votes.filter(voter=players[0]).count() == 2
 
-    opener = fake_interaction(captain)
-    click(opener, "handoff_open", match.pk)
-    view = opener.followup.send.call_args.kwargs["view"]
-    buttons = [
-        c
-        for row in view.to_components()[0]["components"]
-        for c in row.get("components", [])
-        if c.get("type") == 2
-    ]
-    assert len(buttons) == 10
-    assert all(b["custom_id"].split(":")[2] == "handoff_select" for b in buttons)
-    assert target.display_name in [b["label"] for b in buttons]
-
-    chooser = fake_interaction(captain)
-    click(chooser, "handoff_select", match.pk, str(target.pk))
-    handoff = match.handoffs.get()
-
-    answer = fake_interaction(target)
-    click(answer, "handoff_accept", match.pk, str(handoff.pk))
-    assert captain_of(fresh(match), "A").player == target
+    outsider = fake_interaction(make_player(77))
+    click(outsider, "captain_vote", match.pk, values=(str(players[3].pk),))
+    assert "not in this match" in replies(outsider)[0]
 
 
-def test_non_captain_cannot_open_handoff(wired: Community) -> None:
+def test_side_claim_buttons(wired: Community) -> None:
     match, _players = lobby_of_twelve(wired)
-    match = ready_all(match)
+    match = run_player_draft(vote_captains(ready_all(match)))
+    assert match.status == Status.SIDE_SELECT
     other = match.participants.filter(is_captain=False).first().player
-    interaction = fake_interaction(other)
-    click(interaction, "handoff_open", match.pk)
-    assert "Only a captain" in replies(interaction)[0]
+    refused = fake_interaction(other)
+    click(refused, "claim_side", match.pk, "hk")
+    assert "Only a captain" in replies(refused)[0]
+
+    click(fake_interaction(captain_of(match, "B").player), "claim_side", match.pk, "am")
+    match = fresh(match)
+    assert match.status == Status.CHAMPION_DRAFT
+    assert match.hidden_king_team == "A"
 
 
-def test_keep_button(wired: Community) -> None:
+def test_random_champion_button(wired: Community) -> None:
     match, _players = lobby_of_twelve(wired)
-    match = ready_all(match)
-    for team in ("A", "B"):
-        click(fake_interaction(captain_of(match, team).player), "keep", match.pk)
-    assert fresh(match).status == Status.PLAYER_DRAFT
+    match = to_champion_draft(match)
+    click(
+        fake_interaction(acting_captain(match)), "random_champion", match.pk, str(match.step_index)
+    )
+    action = fresh(match).draft_actions.get(step_index=match.step_index)
+    assert action.random_choice
+    assert action.target_champion_id is not None
 
 
 # --- Draft -----------------------------------------------------------------------------------
@@ -276,25 +272,24 @@ def test_keep_button(wired: Community) -> None:
 
 def test_player_and_champion_buttons(wired: Community) -> None:
     match, _players = lobby_of_twelve(wired)
-    match = keep_captains(ready_all(match))
+    match = vote_captains(ready_all(match))
     captain = captain_of(match, match.player_first_pick).player
     target = match.participants.filter(team="").first().player_id
     click(fake_interaction(captain), "pick_player", match.pk, f"0.{target}")
     assert fresh(match).step_index == 1
 
-    match = run_player_draft(match)
-    from league.domain.draft_plan import build_plan, team_for_role
-    from league.services.common import mode_of
-
-    step = build_plan(mode_of(match))[match.step_index]
-    acting = captain_of(match, team_for_role(step.role, match.champion_first_pick)).player
+    match = to_champion_draft(match)
     champion = match.champion_pool[0]
-    click(fake_interaction(acting), "choose_champion", match.pk, f"{match.step_index}.{champion}")
+    click(
+        fake_interaction(acting_captain(match)),
+        "choose_champion",
+        match.pk,
+        f"{match.step_index}.{champion}",
+    )
     assert fresh(match).draft_actions.filter(target_champion_id=champion).exists()
 
     match = fresh(match)
-    step = build_plan(mode_of(match))[match.step_index]
-    other = captain_of(match, team_for_role(step.role, match.champion_first_pick)).player
+    other = acting_captain(match)
     second = match.champion_pool[1]
     click(
         fake_interaction(other), "pick_champion", match.pk, f"{match.step_index}.1", (str(second),)
@@ -304,13 +299,8 @@ def test_player_and_champion_buttons(wired: Community) -> None:
 
 def test_a_champion_click_out_of_turn_is_refused(wired: Community) -> None:
     match, _players = lobby_of_twelve(wired)
-    match = run_player_draft(keep_captains(ready_all(match)))
-    from league.domain.draft_plan import build_plan, team_for_role
-    from league.services.common import mode_of
-
-    step = build_plan(mode_of(match))[match.step_index]
-    acting = team_for_role(step.role, match.champion_first_pick)
-    waiting = captain_of(match, "B" if acting == "A" else "A").player
+    match = to_champion_draft(match)
+    waiting = captain_of(match, "B" if match.champion_first_pick == "A" else "A").player
     champion = match.champion_pool[0]
     interaction = fake_interaction(waiting)
     click(interaction, "choose_champion", match.pk, f"{match.step_index}.{champion}")
@@ -320,7 +310,7 @@ def test_a_champion_click_out_of_turn_is_refused(wired: Community) -> None:
 
 def test_a_stale_click_gets_a_friendly_reply(wired: Community) -> None:
     match, _players = lobby_of_twelve(wired)
-    match = keep_captains(ready_all(match))
+    match = vote_captains(ready_all(match))
     captain = captain_of(match, match.player_first_pick).player
     target = match.participants.filter(team="").first().player_id
     click(fake_interaction(captain), "pick_player", match.pk, f"0.{target}")
@@ -331,7 +321,7 @@ def test_a_stale_click_gets_a_friendly_reply(wired: Community) -> None:
 
 def test_lobby_code_modal_journey(wired: Community) -> None:
     match, _players = lobby_of_twelve(wired)
-    match = run_champion_draft(run_player_draft(keep_captains(ready_all(match))))
+    match = run_champion_draft(run_player_draft(vote_captains(ready_all(match))))
     opener = fake_interaction(match.lobby_code_host)
     click(opener, "code_open", match.pk)
     modal = opener.response.modal
@@ -348,7 +338,7 @@ def test_lobby_code_modal_journey(wired: Community) -> None:
 
 def test_wrong_person_cannot_open_lobby_code(wired: Community) -> None:
     match, _players = lobby_of_twelve(wired)
-    match = run_champion_draft(run_player_draft(keep_captains(ready_all(match))))
+    match = run_champion_draft(run_player_draft(vote_captains(ready_all(match))))
     other = match.participants.filter(is_captain=True).exclude(player=match.lobby_code_host).first()
     interaction = fake_interaction(other.player)
     click(interaction, "code_open", match.pk)
@@ -693,7 +683,7 @@ def test_mode_commands(wired: Community) -> None:
     admin = make_player(50)
     interaction = fake_interaction(admin, administrator=True)
     run_command(subcommand(staff.mode_group, "list"), interaction)
-    assert "threeban_1win_2026" in replies(interaction)[0]
+    assert "bebot_2ban" in replies(interaction)[0]
     assert "(active)" in replies(interaction)[0]
 
     interaction = fake_interaction(admin, administrator=True)

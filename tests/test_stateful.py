@@ -22,7 +22,13 @@ from league.models import DraftAction, Match, Player, QueueEntry
 from league.services import corrections, deadlines, draft, integrity, lobby, queue, results
 from league.services.common import captain_of, mode_of
 from tests.conftest import Clock, make_player
-from tests.helpers import image, keep_captains, run_champion_draft, run_player_draft
+from tests.helpers import (
+    claim_sides,
+    image,
+    run_champion_draft,
+    run_player_draft,
+    vote_captains,
+)
 
 
 class MatchMachine(RuleBasedStateMachine):
@@ -68,21 +74,14 @@ class MatchMachine(RuleBasedStateMachine):
     def ready(self, index: int) -> None:
         self._try(lobby.mark_ready, self.match.pk, self.players[index])
 
-    @rule(index=integers(0, 14))
-    def keep_role(self, index: int) -> None:
-        self._try(lobby.keep_captaincy, self.match.pk, self.players[index])
+    @rule(voter=integers(0, 14), first=integers(0, 14), second=integers(0, 14))
+    def vote(self, voter: int, first: int, second: int) -> None:
+        chosen = [self.players[first].pk, self.players[second].pk]
+        self._try(lobby.cast_captain_votes, self.match.pk, self.players[voter], chosen)
 
-    @rule(captain=integers(0, 14), asked=integers(0, 14))
-    def request_handoff(self, captain: int, asked: int) -> None:
-        self._try(
-            lobby.request_handoff, self.match.pk, self.players[captain], self.players[asked].pk
-        )
-
-    @rule(accept=sampled_from([True, False]))
-    def answer_handoff(self, accept: bool) -> None:
-        handoff = self._fresh().handoffs.filter(status="pending").first()
-        if handoff is not None:
-            self._try(lobby.respond_handoff, handoff.pk, handoff.to_player, accept)
+    @rule(index=integers(0, 14), side=sampled_from(["hk", "am", "nope"]))
+    def claim_side(self, index: int, side: str) -> None:
+        self._try(draft.claim_side, self.match.pk, self.players[index], side)
 
     def _acting(self, match: Match, status: str) -> Player | None:
         if match.status != status:
@@ -119,6 +118,17 @@ class MatchMachine(RuleBasedStateMachine):
         self._try(draft.choose_champion, match.pk, captain, step, champion)
         if double_click:
             self._try(draft.choose_champion, match.pk, captain, step, champion)
+
+    @rule(double_click=sampled_from([False, True]))
+    def press_random(self, double_click: bool) -> None:
+        match = self._fresh()
+        captain = self._acting(match, Status.CHAMPION_DRAFT)
+        if captain is None:
+            return
+        step = match.step_index
+        self._try(draft.choose_random_champion, match.pk, captain, step)
+        if double_click:
+            self._try(draft.choose_random_champion, match.pk, captain, step)
 
     @rule()
     def submit_code(self) -> None:
@@ -162,9 +172,12 @@ class MatchMachine(RuleBasedStateMachine):
         # a whole phase. The other rules still land at any point before and after it.
         match = self._fresh()
         if match.status == Status.CAPTAIN_PHASE:
-            self._try(keep_captains, match)
+            self._try(vote_captains, match)
         elif match.status == Status.PLAYER_DRAFT:
-            self._try(run_player_draft, match)
+            # Straight on through the side claim. The claim_side rule covers it on its own.
+            self._try(lambda: claim_sides(run_player_draft(match), "hk" if agree else "am"))
+        elif match.status == Status.SIDE_SELECT:
+            self._try(claim_sides, match, "hk" if agree else "am")
         elif match.status == Status.CHAMPION_DRAFT:
             self._try(run_champion_draft, match)
         elif match.status == Status.LOBBY_CODE:
@@ -205,13 +218,15 @@ class MatchMachine(RuleBasedStateMachine):
 
     @invariant()
     def ledger_is_consistent(self) -> None:
-        self.statuses_seen.add(self._fresh().status)
+        match = self._fresh()
+        # Every phase the match went through, including ones a single rule passed straight over.
+        self.statuses_seen.update(match.transitions.values_list("to_status", flat=True))
         assert integrity.check_all() == []
 
     @invariant()
     def draft_rows_match_step_index(self) -> None:
         match = self._fresh()
-        if match.status in {Status.PLAYER_DRAFT, Status.CHAMPION_DRAFT}:
+        if match.status in {Status.PLAYER_DRAFT, Status.SIDE_SELECT, Status.CHAMPION_DRAFT}:
             assert DraftAction.objects.filter(match=match).count() == match.step_index
 
     @invariant()
@@ -223,9 +238,17 @@ class MatchMachine(RuleBasedStateMachine):
     @invariant()
     def captains_are_consistent(self) -> None:
         match = self._fresh()
-        if match.status not in {Status.READY_CHECK, Status.VOIDED}:
+        if match.status == Status.CAPTAIN_PHASE:  # Nobody is captain until the vote closes.
+            assert not match.participants.filter(is_captain=True, is_active=True).exists()
+        elif match.status not in {Status.READY_CHECK, Status.VOIDED}:
             for team in ("A", "B"):
                 assert match.participants.filter(is_captain=True, team=team).count() == 1
+
+    @invariant()
+    def hidden_king_always_goes_first(self) -> None:
+        match = self._fresh()
+        if match.champion_first_pick:
+            assert match.champion_first_pick == match.hidden_king_team
 
     @invariant()
     def teams_never_exceed_their_size(self) -> None:
@@ -273,6 +296,7 @@ def test_match_machine(league, clock: Clock) -> None:
     assert {
         Status.CAPTAIN_PHASE,
         Status.PLAYER_DRAFT,
+        Status.SIDE_SELECT,
         Status.CHAMPION_DRAFT,
         Status.LOBBY_CODE,
         Status.IN_PROGRESS,

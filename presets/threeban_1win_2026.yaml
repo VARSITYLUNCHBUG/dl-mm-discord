@@ -1,7 +1,9 @@
 # The 18-step table from the 1win rulebook, section 6.5.5.
 # Night Shift confirms 6v6, 3 bans per team since #62 (2026-10-28) and two opening ban rounds, but
 # NOT this exact order. Replace it with a new version if a Night Shift source differs.
-# All timers are judgement placeholders: the real 1win and Night Shift values are unknown.
+# It runs the standard flow (captain vote, side claim, Hidden King "first"); only the timers and
+# the hero order come from this mode. Timers are judgement placeholders: the real 1win and Night
+# Shift values are unknown.
 schema_version: 1
 slug: threeban_1win_2026
 name: "3-ban draft (1win table; Night Shift candidate)"
@@ -10,18 +12,12 @@ provenance:
   night_shift_status: candidate_unconfirmed
 team_size: 6
 ready_check: { seconds: 180, backfill: next_in_queue }
-captains:
-  selection: top_rating
-  min_games: 0
-  first_pick: lower_rated_captain
-  phase_seconds: 20
-  handoff: { requests_per_captain: 2, accept_seconds: 30 }
+captains: { vote_seconds: 45 }
 player_draft: { order: FSSFFSSFFS, seconds: 45, on_timeout: auto_highest_rating }
 champion_draft:
-  priority: coin_flip
+  side_seconds: 20
   seconds: 30
   excluded_champion_ids: []
-  on_timeout: { ban: skip, pick: auto_random }
   steps:
     - { action: ban, team: first }
     - { action: ban, team: second }

@@ -52,33 +52,30 @@ The admin binds to localhost. Put a TLS reverse proxy in front of it before expo
 | Pop at 12 | Creates a private text channel and lobby voice channel | Queue waits at `max_concurrent_matches` |
 | Gather | In the Waiting Room: moved. Anywhere else: DM with invite and Ready button. DMs closed: mention in the lobby channel | Joining the Waiting Room later moves them |
 | Ready | Ready button on the board and in the DM | 180 s. A miss brings in the next in queue. No replacement: cancel and requeue |
-| Captains | Two highest Elo. Keep or Hand off | 20 s, then the originals stand |
-| Hand-off | Up to 2 requests per team. The replacement must accept in 30 s | A decline or timeout uses a request |
+| Captain vote | Everyone votes for up to two captains, themselves included. Most votes wins; Elo breaks ties and fills any gap | 45 s, or closes early once everyone has voted |
 | Player draft | `FSSFFSSFFS`, lower-rated captain first. Last player is assigned | 45 s, then highest rated |
 | Team voice | Creates team channels and moves anyone in the lobby voice. Everyone else gets a DM invite | Never blocks the draft |
-| Champion draft | Coin flip for first pick, random sides, then the mode's steps | 30 s. A ban skips, a pick is random |
+| Sides | A captain presses Become Hidden King captain or Become Archmother captain. The first press decides both sides | 20 s, then a coin flip |
+| Champion draft | The mode's ban and pick order. Hidden King bans and picks first. 🎲 Random takes a champion on purpose | 40 s a turn. A timeout takes a random champion, for bans too |
+| Draft summary | Named like "Crimson Wolf", with a GIF from `presets/draft_gifs.json` and GLHF, above the lobby code prompt | |
 | Lobby code | A random captain enters it; it's posted with the settings checklist | 3 min, then the other captain, then cancel |
 | Report | Press the team that won, then add the screenshot and optional Deadlock match ID | 3 h without a report goes to staff |
 | Confirm | The other captain confirms, disputes or adds a screenshot | 5 min. Silence confirms |
 | Results | First screenshot and the Elo table go to the results channel. Every screenshot goes to the archive | Effects retry |
 
-All timers and the draft order live in the draft mode. These values are starting judgements, not
-published standards.
+This is the flow the server used with Bebot and NeatQueue, and it is the only one: every match
+runs it. The timers and the ban and pick order live in the draft mode. These values are starting
+judgements, not published standards.
 
-### The Bebot flow (`bebot_2ban`)
-
-This mode keeps the flow the server used with Bebot and NeatQueue. Turn it on with
-`/mode activate slug:bebot_2ban`.
-
-| Step | What changes |
+| Mode | Champion draft |
 |---|---|
-| Captains | Once all 12 are ready, everyone votes for up to two captains, themselves included. Most votes wins; Elo breaks ties and fills any gap. 45 s, and it closes early once everyone has voted. No hand-offs |
-| Sides | After the player draft, a captain presses Become Hidden King captain or Become Archmother captain. The first press decides both sides. 20 s, then a coin flip |
-| Champion draft | Bebot's 16-step, 2-ban order. Hidden King bans and picks first. 40 s a turn, and a timeout takes a random champion for bans too. 🎲 Random takes one on purpose |
-| Draft summary | Named like "Crimson Wolf", with a GIF from `presets/draft_gifs.json` and GLHF, above the lobby code prompt |
+| `bebot_2ban` (default) | Bebot's 16-step, 2-ban order, 40 s a turn |
+| `dcs_s3_2ban` | The same 16 steps, 30 s a turn |
+| `threeban_1win_2026` | The 1win 18-step table, 3 bans a team, 30 s a turn |
 
-Bebot's custom hero emojis are in `presets/champion_emojis.yaml`. Load them with
-`manage.py load_champion_emojis`. The bot must be in the server that owns them.
+Switch with `/mode activate slug:<slug>`. Bebot's custom hero emojis are in
+`presets/champion_emojis.yaml`. Load them with `manage.py load_champion_emojis`. The bot must be in
+the server that owns them.
 
 ### Subs
 
@@ -130,7 +127,11 @@ than deleting them. New lobbies use the change; live matches keep the pool they 
 **A draft mode.** In admin, open a mode under Draft mode versions, edit the JSON and save. Saving
 always writes a new version, and it is refused with a readable error if the format can't work. Then
 run `/mode activate slug:<slug>`. Live matches keep the version they started with. To ship one with
-the code, add a YAML file to `presets/`; `presets/threeban_1win_2026.yaml` is the reference.
+the code, add a YAML file to `presets/`; `presets/bebot_2ban.yaml` is the reference.
+
+A mode sets the timers, the team size, the player draft order and the champion ban and pick order,
+and can exclude champions. The flow itself isn't configurable. In the steps, `first` is the Hidden
+King team.
 
 Version 1 supports sequential bans and picks, with counts and per-step timers. Simultaneous and blind
 steps are rejected until the engine implements them.
@@ -172,7 +173,7 @@ Anything that rewrites past ratings shows a preview and needs Confirm.
 | Players and ratings | `players`, `seasons`, `player_ratings`, `rating_runs`, `rating_events` |
 | Champions and config | `champions`, `draft_mode_versions`, `communities` |
 | Queue | `queue_entries` |
-| Matches | `matches`, `match_participants`, `match_resources`, `match_transitions`, `draft_actions`, `captain_handoffs`, `sub_requests`, `sub_offers` |
+| Matches | `matches`, `match_participants`, `match_resources`, `match_transitions`, `draft_actions`, `captain_votes`, `sub_requests`, `sub_offers` |
 | Results | `result_submissions`, `match_results` |
 | Operations | `penalties`, `outbox_effects` |
 
@@ -268,9 +269,10 @@ by themselves, and Discord calls for them are skipped:
 DEBUG=true DEV_FAKE_PLAYERS=true uv run python manage.py dev_fill_queue --count 11
 ```
 
-Join the queue yourself as the twelfth. To be a captain, give yourself the top rating with
-`/rating seed`. Fake captains and fake players' turns time out on the normal clocks, so a match
-still reaches you. The bot process needs `DEV_FAKE_PLAYERS=true` too. It's refused outside `DEBUG`.
+Join the queue yourself as the twelfth. Fake players don't vote, so to be a captain, vote for
+yourself or give yourself the top rating with `/rating seed`: the vote times out and Elo fills the
+gap. Fake captains' turns and side claims time out on the normal clocks, so a match still reaches
+you. The bot process needs `DEV_FAKE_PLAYERS=true` too. It's refused outside `DEBUG`.
 
 To watch a whole match with no clicking, run this alongside the bot. It puts every real player who
 has played into the lobby, holds at each stage for screenshots, and reuses an archived scoreboard, so

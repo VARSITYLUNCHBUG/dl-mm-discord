@@ -18,15 +18,17 @@ from league.domain.engine import (
     auto_champion,
     auto_player_pick,
     can_transition,
+    draft_name,
     dry_run,
     first_pick_team,
-    select_captains,
+    tally_captain_votes,
 )
 from league.domain.mode_schema import DraftMode, ModeValidationError, parse_mode
 
 PRESETS = Path(__file__).resolve().parent.parent / "presets"
 THREE_BAN = yaml.safe_load((PRESETS / "threeban_1win_2026.yaml").read_text(encoding="utf-8"))
 DCS = yaml.safe_load((PRESETS / "dcs_s3_2ban.yaml").read_text(encoding="utf-8"))
+BEBOT = yaml.safe_load((PRESETS / "bebot_2ban.yaml").read_text(encoding="utf-8"))
 
 
 def body(**changes: object) -> dict[str, object]:
@@ -94,9 +96,35 @@ def test_winner_never_loses_points(a: list[int], b: list[int]) -> None:
 # --- Mode schema ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("raw", [THREE_BAN, DCS])
+@pytest.mark.parametrize("raw", [BEBOT, THREE_BAN, DCS])
 def test_presets_parse(raw: dict[str, object]) -> None:
     assert isinstance(parse_mode(raw), DraftMode)
+
+
+def test_bebot_preset_is_dcs_order_at_40_seconds() -> None:
+    mode = parse_mode(BEBOT)
+    assert mode.captains.vote_seconds == 45
+    assert mode.champion_draft.side_seconds == 20
+    assert mode.champion_draft.seconds == 40
+    assert BEBOT["champion_draft"]["steps"] == DCS["champion_draft"]["steps"]
+
+
+@pytest.mark.parametrize(
+    ("section", "key", "value"),
+    [
+        ("captains", "selection", "top_rating"),
+        ("captains", "handoff", {"requests_per_captain": 2, "accept_seconds": 30}),
+        ("captains", "first_pick", "coin_flip"),
+        ("champion_draft", "priority", "coin_flip"),
+        ("champion_draft", "random_button", False),
+        ("champion_draft", "on_timeout", {"ban": "skip", "pick": "auto_random"}),
+    ],
+)
+def test_the_flow_itself_is_not_configurable(section: str, key: str, value: object) -> None:
+    changed = {**BEBOT[section], key: value}
+    with pytest.raises(ModeValidationError) as caught:
+        parse_mode({**BEBOT, section: changed})
+    assert f"{section}.{key}" in str(caught.value)
 
 
 def test_three_ban_expands_to_exact_1win_table() -> None:
@@ -187,36 +215,48 @@ def candidates(*rows: tuple[int, int, int]) -> list[CaptainCandidate]:
     return [CaptainCandidate(*row) for row in rows]
 
 
-def test_highest_rated_become_captains() -> None:
-    pool = candidates((1, 1200, 10), (2, 1400, 10), (3, 1300, 10), (4, 1000, 10))
-    assert select_captains(pool, "top_rating", 0, seed=1) == (2, 3)
+CANDIDATES = candidates((1, 1000, 5), (2, 1200, 5), (3, 1100, 5))
 
 
-def test_rating_tie_goes_to_more_games() -> None:
+def test_tally_ranks_by_votes_first() -> None:
+    assert tally_captain_votes({1: 5, 3: 4, 2: 1}, CANDIDATES, seed=7) == (1, 3)
+
+
+def test_tally_breaks_a_tie_on_elo() -> None:
+    assert tally_captain_votes({1: 3, 3: 3, 2: 3}, CANDIDATES, seed=7) == (2, 3)
+
+
+def test_tally_with_no_votes_takes_the_top_two_by_elo() -> None:
+    assert tally_captain_votes({}, CANDIDATES, seed=7) == (2, 3)
+
+
+def test_tally_fills_a_short_vote_with_elo() -> None:
+    assert tally_captain_votes({1: 1}, CANDIDATES, seed=7) == (1, 2)
+
+
+def test_tally_rating_tie_goes_to_more_games() -> None:
     pool = candidates((1, 1000, 5), (2, 1000, 50), (3, 1000, 20))
-    assert select_captains(pool, "top_rating", 0, seed=1) == (2, 3)
+    assert tally_captain_votes({}, pool, seed=1) == (2, 3)
 
 
-def test_full_tie_is_seeded_and_reproducible() -> None:
+def test_tally_full_tie_is_seeded_and_reproducible() -> None:
     pool = candidates(*[(i, 1000, 0) for i in range(1, 13)])
-    first = select_captains(pool, "top_rating", 0, seed=7)
-    assert first == select_captains(list(reversed(pool)), "top_rating", 0, seed=7)
-    results = {select_captains(pool, "top_rating", 0, seed=s) for s in range(20)}
+    first = tally_captain_votes({}, pool, seed=7)
+    assert first == tally_captain_votes({}, list(reversed(pool)), seed=7)
+    results = {tally_captain_votes({}, pool, seed=s) for s in range(20)}
     assert len(results) > 1  # Launch-day ties aren't always the same two people.
 
 
-def test_min_games_filters_and_falls_back_to_random() -> None:
-    pool = candidates((1, 2000, 0), (2, 1100, 20), (3, 1000, 20))
-    assert select_captains(pool, "top_rating", 10, seed=1) == (2, 3)
-    few = candidates((1, 2000, 0), (2, 1100, 0), (3, 1000, 20))
-    chosen = select_captains(few, "top_rating", 10, seed=1)
-    assert len(set(chosen)) == 2
+def test_draft_name_is_stable_per_seed() -> None:
+    assert draft_name(123) == draft_name(123)
+    assert len(draft_name(123).split()) == 2
 
 
 def test_lower_rated_captain_picks_first() -> None:
-    assert first_pick_team("lower_rated_captain", 1500, 1400, seed=1) == "B"
-    assert first_pick_team("lower_rated_captain", 1300, 1400, seed=1) == "A"
-    assert first_pick_team("higher_rated_captain", 1500, 1400, seed=1) == "A"
+    assert first_pick_team(1500, 1400, seed=1) == "B"
+    assert first_pick_team(1300, 1400, seed=1) == "A"
+    assert first_pick_team(1400, 1400, seed=1) == first_pick_team(1400, 1400, seed=1)
+    assert {first_pick_team(1400, 1400, seed=s) for s in range(20)} == {"A", "B"}
 
 
 def test_auto_pick_takes_highest_rated() -> None:
@@ -232,6 +272,8 @@ def test_auto_champion_is_reproducible_and_legal() -> None:
 def test_transitions_forbid_skipping_phases() -> None:
     assert can_transition(Status.READY_CHECK, Status.CAPTAIN_PHASE)
     assert not can_transition(Status.READY_CHECK, Status.PLAYER_DRAFT)
+    assert not can_transition(Status.PLAYER_DRAFT, Status.CHAMPION_DRAFT)
+    assert can_transition(Status.PLAYER_DRAFT, Status.SIDE_SELECT)
     assert not can_transition(Status.IN_PROGRESS, Status.COMPLETED)
     assert can_transition(Status.AWAITING_CONFIRMATION, Status.COMPLETED)
 

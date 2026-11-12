@@ -13,7 +13,7 @@ from league.models import Community, DraftAction, Match, Player, QueueEntry
 from league.services import community, integrity, lobby, queue, results
 from league.services.common import captain_of
 from tests.conftest import make_player
-from tests.helpers import fresh, image, keep_captains, ready_all, to_in_progress
+from tests.helpers import fresh, image, ready_all, to_in_progress, vote_captains
 
 pytestmark = pytest.mark.django_db(transaction=True)
 
@@ -47,13 +47,9 @@ def race(*calls: Callable[[], object]) -> tuple[list[object], list[Exception]]:
 
 @pytest.fixture
 def live_league(transactional_db: None) -> Community:
-    from django.conf import settings
+    from tests.conftest import publish_presets
 
-    from league.services import champions, modes
-
-    presets = settings.BASE_DIR / "presets"
-    champions.seed_from_file(presets / "champions.yaml")
-    modes.publish(modes.load_yaml(presets / "threeban_1win_2026.yaml"))
+    publish_presets()
     return community.ensure(guild_id=999, name="Test")
 
 
@@ -66,7 +62,7 @@ def full_lobby(league: Community) -> tuple[Match, list[Player]]:
 
 def test_two_captains_racing_for_one_step_only_one_lands(live_league: Community) -> None:
     match, _players = full_lobby(live_league)
-    match = keep_captains(ready_all(match))
+    match = vote_captains(ready_all(match))
     captain = captain_of(match, match.player_first_pick).player
     targets = list(match.participants.filter(team=""))[:2]
     from league.services import draft
@@ -108,7 +104,7 @@ def test_click_racing_a_timeout_applies_once(live_league: Community) -> None:
     from league.services import deadlines, draft
 
     match, _players = full_lobby(live_league)
-    match = keep_captains(ready_all(match))
+    match = vote_captains(ready_all(match))
     Match.objects.filter(pk=match.pk).update(deadline_at=timezone.now())
     captain = captain_of(match, match.player_first_pick).player
     target = match.participants.filter(team="").first().player_id
@@ -161,5 +157,5 @@ def test_ready_clicks_at_once_start_captains_once(live_league: Community) -> Non
     assert not losses
     match = fresh(match)
     assert match.status == "captain_phase"
-    assert match.participants.filter(is_captain=True).count() == 2
+    assert not match.participants.filter(is_captain=True).exists()  # The vote is open.
     assert match.transitions.filter(to_status="captain_phase").count() == 1

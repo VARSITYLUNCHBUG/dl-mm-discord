@@ -31,24 +31,24 @@ def ready_all(match: Match) -> Match:
     return fresh(match)
 
 
-def keep_captains(match: Match) -> Match:
-    """Settle the captain phase: keep the captains, or, in a vote, vote for the first two."""
+def vote_captains(match: Match) -> Match:
+    """Settle the captain vote: everyone votes for the first two players by ID.
+
+    With the votes tied, Elo, then games, then the seed decide who captains team A.
+    """
     match = fresh(match)
-    if match.status == Status.CAPTAIN_PHASE and lobby.is_vote(match):
+    if match.status == Status.CAPTAIN_PHASE:
         active = list(match.participants.filter(is_active=True).order_by("id"))
         chosen = [active[0].player_id, active[1].player_id]
         for participant in active:
             if fresh(match).status != Status.CAPTAIN_PHASE:
                 break
             lobby.cast_captain_votes(match.pk, participant.player, chosen)
-    elif match.status == Status.CAPTAIN_PHASE:
-        for participant in match.participants.filter(is_active=True, is_captain=True):
-            lobby.keep_captaincy(match.pk, participant.player)
     return fresh(match)
 
 
 def claim_sides(match: Match, side: str = "hk") -> Match:
-    """Team A's captain claims a side, if the format asks captains to."""
+    """Team A's captain claims a side, once the player draft is over."""
     match = fresh(match)
     if match.status == Status.SIDE_SELECT:
         draft.claim_side(match.pk, captain_of(match, "A").player, side)
@@ -67,8 +67,21 @@ def run_player_draft(match: Match) -> Match:
     return match
 
 
-def run_champion_draft(match: Match) -> Match:
+def acting_captain(match: Match) -> Player:
+    """The captain whose turn it is, in the player draft or the champion draft."""
     match = fresh(match)
+    step = build_plan(mode_of(match))[match.step_index]
+    first = match.player_first_pick if step.action == "player_pick" else match.champion_first_pick
+    return captain_of(match, team_for_role(step.role, first)).player
+
+
+def to_champion_draft(match: Match) -> Match:
+    """From the ready check to the first champion draft step."""
+    return claim_sides(run_player_draft(vote_captains(ready_all(match))))
+
+
+def run_champion_draft(match: Match) -> Match:
+    match = claim_sides(match)
     while match.status == Status.CHAMPION_DRAFT:
         step = build_plan(mode_of(match))[match.step_index]
         team = team_for_role(step.role, match.champion_first_pick)
@@ -80,7 +93,7 @@ def run_champion_draft(match: Match) -> Match:
 
 
 def to_in_progress(match: Match) -> Match:
-    match = run_champion_draft(claim_sides(run_player_draft(keep_captains(ready_all(match)))))
+    match = run_champion_draft(to_champion_draft(match))
     draft.submit_lobby_code(match.pk, match.lobby_code_host, "ABC123")
     return fresh(match)
 

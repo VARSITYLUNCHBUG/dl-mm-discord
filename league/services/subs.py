@@ -22,7 +22,6 @@ from league.domain.engine import Status
 from league.domain.errors import InvalidAction, NotAllowed, StaleAction
 from league.domain.mode_schema import DraftMode
 from league.models import (
-    CaptainHandoff,
     Match,
     MatchParticipant,
     Player,
@@ -30,7 +29,7 @@ from league.models import (
     SubOffer,
     SubRequest,
 )
-from league.models.matches import HandoffStatus, Source
+from league.models.matches import Source
 from league.models.moderation import PenaltyKind
 from league.models.subs import UNRESOLVED, OfferSource, OfferStatus, SubStatus
 from league.services import lobby, penalties
@@ -499,10 +498,6 @@ def _release_if_clear(match: Match) -> None:
     match.deadline_at = moment + timedelta(seconds=max(match.held_seconds, RESUME_MIN_SECONDS))
     match.held_seconds = None
     bump(match, "held_seconds", "deadline_at")
-    soonest = moment + timedelta(seconds=RESUME_MIN_SECONDS)
-    CaptainHandoff.objects.filter(
-        match=match, status=HandoffStatus.PENDING, deadline_at__lt=soonest
-    ).update(deadline_at=soonest)
     if match.status == Status.READY_CHECK:
         if not active_participants(match).filter(ready_at__isnull=True).exists():
             lobby.begin_captain_phase(match)

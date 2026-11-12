@@ -8,7 +8,7 @@ from league.domain.errors import InvalidAction
 from league.models import Community, DraftModeVersion, Season
 from league.services.common import now
 
-DEFAULT_MODE_SLUG = "threeban_1win_2026"
+DEFAULT_MODE_SLUG = "bebot_2ban"
 
 
 def get(guild_id: int) -> Community | None:

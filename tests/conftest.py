@@ -6,8 +6,28 @@ import pytest
 from django.conf import settings
 from django.utils import timezone
 
-from league.models import Community, Match, Player
+from league.models import Community, DraftModeVersion, Match, Player
 from league.services import champions, common, community, modes, queue
+
+PRESETS = settings.BASE_DIR / "presets"
+NOT_MODES = frozenset({"champions.yaml", "champion_emojis.yaml"})
+
+
+def publish_presets() -> None:
+    """Seed the champions and publish every preset draft mode, as `load_presets` does."""
+    champions.seed_from_file(PRESETS / "champions.yaml")
+    for path in sorted(PRESETS.glob("*.yaml")):
+        if path.name not in NOT_MODES:
+            modes.publish(modes.load_yaml(path))
+
+
+def activate(league: Community, slug: str) -> Community:
+    """Switch new lobbies to another preset. Every preset runs the same flow."""
+    version = DraftModeVersion.objects.filter(slug=slug).order_by("-version").first()
+    assert version is not None, slug
+    modes.activate(league.pk, version.pk)
+    league.refresh_from_db()
+    return league
 
 
 class Clock:
@@ -59,11 +79,7 @@ def clock(monkeypatch: pytest.MonkeyPatch) -> Clock:
 
 @pytest.fixture
 def league(db: None) -> Community:
-    presets = settings.BASE_DIR / "presets"
-    champions.seed_from_file(presets / "champions.yaml")
-    for path in sorted(presets.glob("*.yaml")):
-        if path.name not in {"champions.yaml", "champion_emojis.yaml"}:
-            modes.publish(modes.load_yaml(path))
+    publish_presets()
     return community.ensure(guild_id=999, name="Test")
 
 
@@ -83,3 +99,11 @@ def popped(league: Community, players: list[Player]) -> Match:
     for player in players:
         queue.join(league.pk, player)
     return Match.objects.get()
+
+
+@pytest.fixture
+def voting(popped: Match) -> Match:
+    """Everyone is ready and the captain vote is open."""
+    from tests.helpers import ready_all
+
+    return ready_all(popped)
