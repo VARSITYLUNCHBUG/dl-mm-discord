@@ -10,7 +10,7 @@ from django.db import transaction
 from league.domain.engine import LIVE, Status
 from league.domain.errors import DomainError
 from league.models import Community, Match
-from league.services import draft, lobby, queue, results, subs
+from league.services import draft, early_leave, lobby, queue, results, subs
 from league.services.common import lock_match, now
 
 logger = logging.getLogger(__name__)
@@ -55,6 +55,7 @@ def tick() -> int:
             logger.exception("Match deadline failed", extra={"match": match_id})
 
     fired += subs.tick(moment)
+    fired += early_leave.tick(moment)
 
     for community_id in Community.objects.values_list("pk", flat=True):
         try:
