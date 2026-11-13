@@ -596,17 +596,17 @@ def test_one_report_then_silence_finalises(popped: Match, clock: Clock) -> None:
     assert match.rating_events.count() == 12
 
 
-def test_confirm_finalises_immediately_with_shared_delta(popped: Match) -> None:
+def test_confirm_finalises_immediately_and_rates(popped: Match) -> None:
     match = finish(to_in_progress(popped), "B")
     assert match.status == Status.COMPLETED
     assert match.winner == "B"
-    winners = RatingEvent.objects.filter(
-        match=match, player__in=[p.player for p in match.participants.filter(team="B")]
-    )
-    assert {event.delta for event in winners} == {16}
-    assert sum(event.delta for event in RatingEvent.objects.filter(match=match)) == 0
-    assert PlayerRating.objects.filter(season=match.season, rating=1016).count() == 6
-    assert PlayerRating.objects.filter(season=match.season, rating=984).count() == 6
+    winners = {p.player_id for p in match.participants.filter(team="B")}
+    events = list(RatingEvent.objects.filter(match=match))
+    assert all(e.mu_delta > 0 for e in events if e.player_id in winners)
+    assert all(e.mu_delta < 0 for e in events if e.player_id not in winners)
+    assert all(e.sigma_delta < 0 for e in events)  # Everyone is a little more certain.
+    rows = PlayerRating.objects.filter(season=match.season)
+    assert rows.count() == 12 and all(row.games == 1 for row in rows)
     assert integrity.check_all() == []
 
 
@@ -723,7 +723,7 @@ def test_live_substitute_inherits_captaincy_and_result(popped: Match) -> None:
     match = fresh(match)
     assert captain_of(match, "A").player == sub
     finish(match, "A")
-    assert RatingEvent.objects.filter(player=sub, delta=16).exists()
+    assert RatingEvent.objects.get(player=sub).mu_delta > 0  # The sub takes the win.
     assert not RatingEvent.objects.filter(player=leaving).exists()
 
 

@@ -505,8 +505,11 @@ def test_results_show_each_teams_change(popped: Match) -> None:
     assert "attachment://match-1.png" in payload
     captain = boards.captain_names(match)["A"]
     assert f"{captain}'s Team won" in payload
-    assert "> **+16** | __1016__ | " in team_table(model.team_a)
-    assert "> **-16** | __984__ | " in team_table(model.team_b)
+    # New players show a conservative 0, so one game can leave the shown number where it was.
+    winner, loser = model.team_a[0], model.team_b[0]
+    assert winner.after >= winner.before and loser.after <= loser.before
+    assert f"> **{winner.delta:+d}** | " in team_table(model.team_a)
+    assert f"__{winner.after}__" in team_table(model.team_a)
     for word in ("Team A", "Team B", "Hidden King", "Archmother", "K 32"):
         assert word not in payload
 

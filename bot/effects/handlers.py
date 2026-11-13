@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
@@ -17,12 +18,17 @@ from bot.renderers.board import (
     render_voice_dm,
 )
 from bot.renderers.queue import render_queue
-from bot.renderers.results import render_correction, render_results
+from bot.renderers.results import (
+    render_correction,
+    render_results,
+    render_scoreboard_notice,
+)
 from league.domain.engine import Status
 from league.domain.errors import DomainError
+from league.integrations import deadlock_api
 from league.models import Community, Match, OutboxEffect, Player
 from league.models.matches import ResourceKind
-from league.services import boards, dev, effects, lobby, subs
+from league.services import api_results, boards, dev, draft, effects, lobby, ocr, subs
 from league.services.common import add_effect
 from league.services.common import render_board as request_board
 
@@ -582,6 +588,119 @@ async def post_results(env: Env) -> None:
     view = render_results(view_model, attachment_name=file[0] if file else None)
     message_id = await env.gateway.send_view(results_channel, view, file=file)
     await db(effects.record_resource, env.match_id, ResourceKind.RESULTS_MESSAGE, message_id)
+
+
+async def _results_attachment_name(env: Env, view_model: boards.ResultsView) -> str | None:
+    shot = view_model.screenshot
+    if shot is None or not shot.archive_channel_id or not shot.archive_message_id:
+        return None
+    fetched = await env.gateway.fetch_attachment(
+        shot.archive_channel_id, shot.archive_message_id, shot.attachment_id or 0
+    )
+    if fetched is None:
+        return None
+    suffix = fetched[0].rsplit(".", 1)[-1] if "." in fetched[0] else "png"
+    return f"match-{env.match_id}.{suffix}"
+
+
+@effect("refresh_results")
+async def refresh_results(env: Env) -> None:
+    """Awards or stats arrived after the results were posted: edit the post in place."""
+    results_channel = env.community.results_channel_id
+    message_id = await db(effects.resource_id, env.match_id, ResourceKind.RESULTS_MESSAGE)
+    if not results_channel or not message_id:
+        raise Skip("No results post to refresh.")
+    view_model = await db(boards.results_view, env.match_id)
+    name = await _results_attachment_name(env, view_model)
+    await env.gateway.edit_view(
+        results_channel, message_id, render_results(view_model, attachment_name=name)
+    )
+
+
+# --- Score OCR -------------------------------------------------------------------------------
+
+
+@effect("read_scoreboard")
+async def read_scoreboard(env: Env) -> None:
+    """Read a report screenshot. A failed read is recorded, never retried in a loop: the result
+    stands without it, and staff can still set awards by hand."""
+    submission_id = int(env.effect.payload["submission_id"])
+    where = await db(ocr.submission_image, submission_id)
+    if where is None:
+        raise Skip("The screenshot isn't archived.")
+    if not ocr.available():
+        await db(ocr.record_failure, submission_id, "failed", "Score OCR isn't installed here.")
+        raise Skip("Score OCR isn't installed.")
+    fetched = await env.gateway.fetch_attachment(*where)
+    if fetched is None:
+        raise Skip("The archived screenshot is gone.")
+    try:
+        result = await asyncio.to_thread(ocr.read_image, fetched[1])
+    except Exception as exc:
+        status = "rejected" if ocr.is_not_a_scoreboard(exc) else "failed"
+        if status == "failed":
+            logger.exception("Scoreboard read failed", extra={"match": env.match_id})
+        await db(ocr.record_failure, submission_id, status, f"{type(exc).__name__}: {exc}")
+        return
+    await db(ocr.ingest, submission_id, result)
+
+
+@effect("create_api_lobby")
+async def create_api_lobby(env: Env) -> None:
+    """Ask deadlock-api's bot to host the lobby. Any failure hands it back to the captain."""
+    community = env.community
+    try:
+        lobby_ = await asyncio.to_thread(
+            deadlock_api.create_custom_match, community.lobby_region, "normal"
+        )
+    except deadlock_api.ApiError as exc:
+        await db(draft.api_lobby_failed, env.match_id, str(exc))
+        return
+    await db(draft.accept_api_lobby, env.match_id, lobby_.party_id, lobby_.party_code)
+
+
+@effect("fetch_api_match_id")
+async def fetch_api_match_id(env: Env) -> None:
+    """Deadlock's match ID for a started API lobby, so the result can be checked later."""
+    match = await db(_reload, env.match_id)
+    if not match.api_party_id or match.deadlock_match_id is not None:
+        raise Skip("Nothing to fetch.")
+    attempt = int(env.effect.payload.get("attempt", 1))
+    try:
+        found = await asyncio.to_thread(deadlock_api.custom_match_id, match.api_party_id)
+    except deadlock_api.ApiError:
+        found = None
+    await db(draft.record_api_match_id, env.match_id, found, attempt)
+
+
+@effect("check_match_api")
+async def check_match_api(env: Env) -> None:
+    """Fetch the match from deadlock-api and compare. A miss is recorded and retried later by
+    its own new effect, never by failing this one."""
+    deadlock_match_id = int(env.effect.payload["deadlock_match_id"])
+    try:
+        data = await asyncio.to_thread(deadlock_api.match_metadata, deadlock_match_id)
+    except deadlock_api.ApiError as exc:
+        await db(
+            api_results.record_miss, env.match_id, deadlock_match_id, "error", exc.status, str(exc)
+        )
+        return
+    if data is None:
+        await db(api_results.record_miss, env.match_id, deadlock_match_id, "not_found", 404, "")
+        return
+    await db(api_results.record_metadata, env.match_id, deadlock_match_id, data)
+
+
+@effect("scoreboard_notice")
+async def scoreboard_notice(env: Env) -> None:
+    """Ask the captains to match the scoreboard names the reader couldn't place."""
+    read_id = int(env.effect.payload["read_id"])
+    unmapped = int(env.effect.payload.get("unmapped", 0))
+    channel_id = await _text_channel(env)
+    view = render_scoreboard_notice(env.match_id, read_id, unmapped)
+    message_id = await env.gateway.send_view(channel_id, view)
+    await db(effects.record_notice, env.match_id, message_id)
+    await db(_request_board, env.match_id)
 
 
 @effect("post_correction")

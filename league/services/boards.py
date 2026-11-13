@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
+
+from django.db.models import Max
 
 from league.domain.draft_plan import PlanStep, build_plan, team_for_role
 from league.domain.engine import TERMINAL, Status, draft_name, pick_gif
@@ -12,7 +14,9 @@ from league.models import (
     Champion,
     Community,
     Match,
+    MatchAward,
     Player,
+    PlayerMatchStat,
     PlayerRating,
     QueueEntry,
     RatingEvent,
@@ -20,6 +24,8 @@ from league.models import (
     Season,
 )
 from league.models.subs import UNRESOLVED, OfferSource, OfferStatus, SubRequest, SubStatus
+from league.services import awards as award_service
+from league.services import ocr, ratings, standing
 from league.services.common import mode_of, rating_of
 from league.services.gifs import draft_gifs
 from league.services.lobby import TEXT_CHANNEL_GRACE_MINUTES
@@ -53,6 +59,13 @@ class PlayerLine:
     team: str = ""
     is_captain: bool = False
     is_ready: bool = False
+    captain_ok: bool = True  # Can be voted captain under the mode's rule.
+    captain_note: str = ""  # Why not, such as "2/5 matches".
+    placement: str = ""  # "P 3/10" while an OpenSkill rating is still settling.
+
+    @property
+    def rating_label(self) -> str:
+        return self.placement or str(self.rating)
 
 
 @dataclass(frozen=True, slots=True)
@@ -124,6 +137,20 @@ class BoardState:
     next_action: str = ""
     # Who has voted in the captain vote so far.
     voted_ids: frozenset[int] = frozenset()
+    # Completed matches a player needs before they can captain. 0 means anyone can.
+    captain_min_games: int = 0
+    # Team A's chance of winning once both teams are drafted, from current ratings.
+    win_chance_a: float | None = None
+    # deadlock-api lobbies: the server makes them, its bot hosts, and a captain presses Start.
+    auto_lobby: bool = False
+    api_lobby: bool = False
+    api_started: bool = False
+    api_leaves_at: datetime | None = None
+    # Early leave: whether a captain can report one now, and a report waiting for an answer.
+    early_leave_open: bool = False
+    early_leave_name: str = ""
+    early_leave_by: str = ""
+    early_leave_minutes: int = 5
     # The draft summary: a name for the draft and a GIF.
     draft_name: str = ""
     gif_url: str | None = None
@@ -162,12 +189,13 @@ def _turn_progress(plan: tuple[PlanStep, ...], index: int) -> tuple[int, int]:
 
 
 def board_state(match_id: int) -> BoardState:
-    match = Match.objects.select_related("mode_version", "season", "lobby_code_host").get(
-        pk=match_id
-    )
+    match = Match.objects.select_related(
+        "mode_version", "season", "lobby_code_host", "community"
+    ).get(pk=match_id)
     mode = mode_of(match)
     participants = match.participants.filter(removed_reason="").select_related("player")
     players = []
+    labels = ratings.placement_labels(match.season, [p.player_id for p in participants])
     for participant in participants:
         rating, _games = rating_of(match.season, participant.player_id)
         players.append(
@@ -179,6 +207,7 @@ def board_state(match_id: int) -> BoardState:
                 team=participant.team,
                 is_captain=participant.is_captain,
                 is_ready=participant.ready_at is not None,
+                placement=labels.get(participant.player_id, ""),
             )
         )
     players.sort(key=lambda line: (-line.rating, line.name.lower()))
@@ -197,6 +226,10 @@ def board_state(match_id: int) -> BoardState:
         is_terminal=match.status in TERMINAL,
     )
     state.captains = {p.team: p.name for p in players if p.is_captain and p.team}
+    team_a = [p.player_id for p in players if p.team == "A"]
+    team_b = [p.player_id for p in players if p.team == "B"]
+    if len(team_a) == len(team_b) == mode.team_size and match.status not in TERMINAL:
+        state.win_chance_a = ratings.expected_win(match.season, team_a, team_b)
     if match.ended_at is not None:
         state.closes_at = match.ended_at + timedelta(minutes=TEXT_CHANNEL_GRACE_MINUTES)
     if match.lobby_code_host is not None:
@@ -254,6 +287,32 @@ def board_state(match_id: int) -> BoardState:
         state.voted_ids = frozenset(
             match.captain_votes.filter(voter_id__in=active).values_list("voter_id", flat=True)
         )
+        state.captain_min_games = mode.captains.min_games
+        allowed = standing.eligibility(match.community, mode, active)
+        state.players = [
+            replace(
+                line,
+                captain_ok=allowed[line.player_id].eligibility.ok,
+                captain_note=allowed[line.player_id].eligibility.reason,
+            )
+            for line in state.players
+        ]
+    state.auto_lobby = match.community.auto_lobby
+    state.api_lobby = bool(match.api_party_id)
+    state.api_started = match.api_started_at is not None
+    if match.api_lobby_created_at is not None:
+        from league.services.draft import API_LOBBY_MINUTES
+
+        state.api_leaves_at = match.api_lobby_created_at + timedelta(minutes=API_LOBBY_MINUTES)
+    if match.status == Status.IN_PROGRESS:
+        from league.services import early_leave
+
+        state.early_leave_minutes = mode.results.early_leave_minutes
+        claim = early_leave.pending(match)
+        if claim is not None:
+            state.early_leave_name = claim.leaver.display_name
+            state.early_leave_by = claim.requested_by.display_name
+        state.early_leave_open = early_leave.can_report(match)
     state.draft_name = draft_name(match.rng_seed)
     state.gif_url = pick_gif(match.rng_seed, draft_gifs())
     state.on_hold = match.held_seconds is not None
@@ -343,6 +402,8 @@ class ResultRow:
     before: int
     after: int
     is_captain: bool
+    award: str = ""  # "mvp", "key" or empty.
+    stat_line: str = ""  # "Mirage 12/8/13, 38k damage", from the scoreboard read.
 
     @property
     def delta(self) -> int:
@@ -365,9 +426,30 @@ class ResultsView:
     bans: list[str]
     screenshot: ResultSubmission | None
     captains: dict[str, str] = field(default_factory=dict)
+    duration_s: int | None = None
+    deadlock_match_id: int | None = None
 
     def team_name(self, team: str) -> str:
         return team_name(self.captains.get(team, "Captain"))
+
+
+def _compact(value: int | None) -> str:
+    if value is None:
+        return "?"
+    if value >= 10_000:
+        return f"{value // 1000}k"
+    if value >= 1000:
+        return f"{value / 1000:.1f}k"
+    return str(value)
+
+
+def stat_line(stat: PlayerMatchStat) -> str:
+    kda = f"{stat.kills if stat.kills is not None else '?'}/" + (
+        f"{stat.deaths if stat.deaths is not None else '?'}/"
+        f"{stat.assists if stat.assists is not None else '?'}"
+    )
+    hero = stat.hero.name if stat.hero else stat.hero_name
+    return f"{hero} {kda}, {_compact(stat.player_damage)} damage".strip()
 
 
 def results_view(match_id: int) -> ResultsView:
@@ -378,11 +460,25 @@ def results_view(match_id: int) -> ResultsView:
     }
     team_a: list[ResultRow] = []
     team_b: list[ResultRow] = []
+    net = match_deltas(match)  # Live plus any corrections, such as awards that came later.
+    awards = award_service.current(match)[0]
+    read = ocr.latest_read(match)
+    stats = {
+        stat.player_id: stat
+        for stat in (read.stats.select_related("hero") if read else [])
+        if stat.player_id is not None
+    }
+    from league.services import api_results  # Imports boards' helpers, so not at the top.
+
+    api_lines = api_results.api_stat_lines(match)
+    api_check = api_results.latest_ok(match)
     participants = match.participants.filter(removed_reason="").select_related("player")
     for participant in participants:
         event = events.get(participant.player_id)
-        after = event.rating_after if event else match.season.start_rating
-        before = after - event.delta if event else after
+        live_after = event.rating_after if event else match.season.start_rating
+        before = live_after - event.delta if event else live_after
+        after = before + net.get(participant.player_id, 0) if event else live_after
+        stat = stats.get(participant.player_id)
         row = ResultRow(
             player_id=participant.player_id,
             discord_user_id=participant.player.discord_user_id,
@@ -390,6 +486,8 @@ def results_view(match_id: int) -> ResultsView:
             before=before,
             after=after,
             is_captain=participant.is_captain,
+            award=awards.get(participant.player_id, ""),
+            stat_line=stat_line(stat) if stat else api_lines.get(participant.player_id, ""),
         )
         (team_a if participant.team == "A" else team_b).append(row)
     team_a.sort(key=lambda r: -r.before)
@@ -424,6 +522,17 @@ def results_view(match_id: int) -> ResultsView:
         bans=bans,
         screenshot=screenshot,
         captains=captain_names(match),
+        duration_s=(read.duration_s if read else None)
+        or (api_check.duration_s if api_check else None),
+        deadlock_match_id=match.deadlock_match_id
+        or next(
+            (
+                sub.deadlock_match_id
+                for sub in match.submissions.order_by("id")
+                if sub.deadlock_match_id
+            ),
+            None,
+        ),
     )
 
 
@@ -497,7 +606,7 @@ def leaderboard(season: Season, limit: int = 20) -> list[LeaderboardRow]:
     ]
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class PlayerStats:
     name: str
     rating: int
@@ -506,6 +615,37 @@ class PlayerStats:
     losses: int
     rank: int | None
     recent: list[tuple[int, int, int]]  # (match ID, delta, rating after)
+    tier: str = ""  # OpenSkill seasons only.
+    placement: str = ""
+    mu: float | None = None
+    sigma: float | None = None
+    mvps: int = 0
+    keys: int = 0
+    scoreboards: int = 0  # Matches with a scoreboard row for this player.
+    avg_kda: tuple[float, float, float] | None = None
+    avg_damage: float | None = None
+    strikes: str = ""
+    captain: str = ""
+
+
+def _scoreboard_averages(
+    player: Player,
+) -> tuple[int, tuple[float, float, float] | None, float | None]:
+    """Across the latest read of each match this player was matched in."""
+    latest: dict[int, PlayerMatchStat] = {}
+    for stat in PlayerMatchStat.objects.filter(player=player).order_by("match_id", "read_id"):
+        latest[stat.match_id] = stat
+    rows = list(latest.values())
+    if not rows:
+        return 0, None, None
+
+    def mean(values: list[int | None]) -> float | None:
+        known = [v for v in values if v is not None]
+        return sum(known) / len(known) if known else None
+
+    k, d, a = (mean([getattr(r, f) for r in rows]) for f in ("kills", "deaths", "assists"))
+    kda = (k, d, a) if None not in (k, d, a) else None
+    return len(rows), kda, mean([r.player_damage for r in rows])  # type: ignore[return-value]
 
 
 def player_stats(season: Season, player: Player, history: int = 10) -> PlayerStats:
@@ -521,7 +661,7 @@ def player_stats(season: Season, player: Player, history: int = 10) -> PlayerSta
             + 1
         )
     recent = RatingEvent.objects.filter(season=season, player=player).order_by("-id")[:history]
-    return PlayerStats(
+    stats = PlayerStats(
         name=player.display_name,
         rating=rating,
         games=games,
@@ -530,3 +670,36 @@ def player_stats(season: Season, player: Player, history: int = 10) -> PlayerSta
         rank=rank,
         recent=[(event.match_id or 0, event.delta, event.rating_after) for event in recent],
     )
+    from league.domain.openskill_v1 import tier
+
+    state = ratings.state_of(season, row)
+    stats.tier = tier(state.mu, state.sigma, ratings.params_for(season))
+    stats.mu, stats.sigma = float(state.mu), float(state.sigma)
+    stats.placement = ratings.placement_labels(season, [player.pk]).get(player.pk, "")
+    award_rows = MatchAward.objects.filter(player=player, match__season=season)
+    current: dict[int, dict[int, str]] = {}
+    for match_id, revision, kind in award_rows.values_list("match_id", "revision", "kind"):
+        current.setdefault(match_id, {})[revision] = kind
+    latest_revisions = dict(
+        MatchAward.objects.filter(match_id__in=list(current))
+        .values("match_id")
+        .annotate(top=Max("revision"))
+        .values_list("match_id", "top")
+    )
+    for match_id, kinds in current.items():
+        latest_kind = kinds.get(latest_revisions.get(match_id, -1))
+        stats.mvps += latest_kind == "mvp"
+        stats.keys += latest_kind == "key"
+    stats.scoreboards, stats.avg_kda, stats.avg_damage = _scoreboard_averages(player)
+    community = season.community
+    now_standing = standing.standing(community, player)
+    stats.strikes = standing.describe(now_standing, standing.strike_policy(community))
+    mode = parse_mode(community.active_mode.body)
+    eligible = standing.eligibility(community, mode, [player.pk])[player.pk].eligibility
+    if eligible.ok:
+        stats.captain = "can captain"
+    elif eligible.reason == "barred by staff":
+        stats.captain = "barred from captaining by staff"
+    else:
+        stats.captain = f"can't captain yet ({eligible.reason})"
+    return stats

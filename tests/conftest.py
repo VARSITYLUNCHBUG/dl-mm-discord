@@ -13,12 +13,22 @@ PRESETS = settings.BASE_DIR / "presets"
 NOT_MODES = frozenset({"champions.yaml", "champion_emojis.yaml"})
 
 
-def publish_presets() -> None:
-    """Seed the champions and publish every preset draft mode, as `load_presets` does."""
+def publish_presets(*, captain_rule: bool = False) -> None:
+    """Seed the champions and publish every preset draft mode, as `load_presets` does.
+
+    Without `captain_rule`, anyone can captain: most tests are about something else, and twelve
+    brand-new players would otherwise always skip the vote. The `captain_rule` fixture publishes
+    the presets as shipped.
+    """
     champions.seed_from_file(PRESETS / "champions.yaml")
     for path in sorted(PRESETS.glob("*.yaml")):
         if path.name not in NOT_MODES:
-            modes.publish(modes.load_yaml(path))
+            body = modes.load_yaml(path)
+            if not captain_rule:
+                captains = dict(body.get("captains") or {})  # type: ignore[call-overload]
+                captains.update(min_games=0, max_strikes=None)
+                body["captains"] = captains
+            modes.publish(body)
 
 
 def activate(league: Community, slug: str) -> Community:
@@ -49,28 +59,40 @@ def clock(monkeypatch: pytest.MonkeyPatch) -> Clock:
     monkeypatch.setattr(common, "now", instance.now)
     # Services import `now` by name, so each one needs patching too.
     from league.services import (
+        api_results,
+        awards,
         corrections,
         deadlines,
         draft,
+        early_leave,
         effects,
         lobby,
+        ocr,
         penalties,
         results,
+        standing,
+        steam,
         subs,
     )
     from league.services import queue as queue_service
     from league.services import ratings as ratings_service
 
     for module in (
+        api_results,
+        awards,
         corrections,
         deadlines,
         draft,
+        early_leave,
         effects,
         lobby,
+        ocr,
         penalties,
         queue_service,
         ratings_service,
         results,
+        standing,
+        steam,
         subs,
     ):
         monkeypatch.setattr(module, "now", instance.now)
@@ -99,6 +121,13 @@ def popped(league: Community, players: list[Player]) -> Match:
     for player in players:
         queue.join(league.pk, player)
     return Match.objects.get()
+
+
+@pytest.fixture
+def captain_rule(league: Community) -> Community:
+    """New lobbies use the presets' real captain rule: 5 completed matches, under 3 strikes."""
+    publish_presets(captain_rule=True)
+    return activate(league, league.active_mode.slug)
 
 
 @pytest.fixture

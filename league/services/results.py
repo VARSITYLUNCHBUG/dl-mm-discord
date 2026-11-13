@@ -11,7 +11,9 @@ from league.domain.errors import InvalidAction, NotAllowed, StaleAction
 from league.models import Match, MatchResult, Player, ResultSubmission
 from league.models.matches import Source
 from league.models.results import Verdict
-from league.services import ratings
+from league.models.scoreboards import AwardSource
+from league.services import api_results, ratings, standing
+from league.services import awards as award_service
 from league.services.boards import outcome_label
 from league.services.common import (
     add_effect,
@@ -23,6 +25,7 @@ from league.services.common import (
     now,
     render_board,
     render_queue,
+    roster,
     save_transition,
     seconds_from_now,
     transition,
@@ -93,6 +96,40 @@ def _first_report(match: Match) -> ResultSubmission | None:
     return match.submissions.filter(verdict=Verdict.REPORT).order_by("id").first()
 
 
+def _record_report_awards(match: Match, captain: Player, awards: dict[int, str] | None) -> None:
+    """A captain's MVP and key-player picks. They never cause a dispute, and a confident
+    scoreboard read or staff replaces them."""
+    if not awards:
+        return
+    try:
+        award_service.record(match, awards, AwardSource.REPORT, captain)
+    except InvalidAction:
+        # A pick that no longer fits, such as a player subbed out since the form opened, is
+        # dropped. It must never stop the result itself.
+        return
+
+
+def _after_submission(
+    match: Match, submission: ResultSubmission, deadlock_match_id: int | None
+) -> None:
+    """Checks that run off a report: the scoreboard read, and deadlock-api by match ID."""
+    _read_scoreboard(match, submission)
+    if deadlock_match_id:
+        api_results.set_deadlock_match_id(match, deadlock_match_id)
+    api_results.schedule(match)  # Deduplicated: the first attempt is queued once per match ID.
+
+
+def _read_scoreboard(match: Match, submission: ResultSubmission) -> None:
+    if match.community.score_ocr != "off" and submission.archive_message_id:
+        add_effect(
+            match.community,
+            "read_scoreboard",
+            {"submission_id": submission.pk},
+            match=match,
+            dedupe_key=f"read_scoreboard:{submission.pk}",
+        )
+
+
 @transaction.atomic
 def submit_report(
     match_id: int,
@@ -100,6 +137,7 @@ def submit_report(
     winner: str,
     image: ImageRef,
     deadlock_match_id: int | None = None,
+    awards: dict[int, str] | None = None,
 ) -> str:
     """Record a captain's report and return the match's new status."""
     match = lock_match(match_id)
@@ -113,7 +151,7 @@ def submit_report(
 
     if match.status == Status.IN_PROGRESS:
         close_subs(match)  # The game is over, so nobody needs to come in now.
-        _create_submission(
+        submission = _create_submission(
             match,
             captain,
             Verdict.REPORT,
@@ -121,6 +159,7 @@ def submit_report(
             image=image,
             deadlock_match_id=deadlock_match_id,
         )
+        _record_report_awards(match, captain, awards)
         mode = mode_of(match)
         transition(
             match,
@@ -149,13 +188,15 @@ def submit_report(
                 match=match,
             )
         render_board(match)
+        # After the board, so a slow read never holds up what the captains see.
+        _after_submission(match, submission, deadlock_match_id)
         return match.status
 
     first = _first_report(match)
     if first is None:  # Unreachable through the bot, but never finalise on no report.
         raise InvalidAction("There's no report to respond to.")
     if first.claimed_winner == winner:
-        _create_submission(
+        submission = _create_submission(
             match,
             captain,
             Verdict.CONFIRM,
@@ -163,9 +204,11 @@ def submit_report(
             image=image,
             deadlock_match_id=deadlock_match_id,
         )
+        _record_report_awards(match, captain, awards)
         _finalise(match, winner, source=Source.USER, actor=captain)
+        _after_submission(match, submission, deadlock_match_id)
     else:
-        _create_submission(
+        submission = _create_submission(
             match,
             captain,
             Verdict.DISPUTE,
@@ -175,6 +218,7 @@ def submit_report(
             note="Reported the other team as the winner.",
         )
         _dispute(match, captain, "The captains reported different winners.")
+        _after_submission(match, submission, deadlock_match_id)
     return match.status
 
 
@@ -257,6 +301,8 @@ def _finalise(
 ) -> None:
     """Result, ledger and projections commit together. Discord effects follow the commit."""
     community = lock_community(match.community_id)  # Keeps ledger order equal to `ended_at` order.
+    on_roster = list(roster(match).values_list("player_id", flat=True))
+    strikes_before = standing.standings(community, on_roster)
     moment = now()
     revision = next_revision(match)
     MatchResult.objects.create(
@@ -273,9 +319,33 @@ def _finalise(
     transition(match, Status.COMPLETED, source=source, actor=actor)
     save_transition(match, "winner", "ended_at")
     ratings.apply_live_result(match, outcome, revision)
+    _announce_strikes(match, on_roster, strikes_before)
     match.participants.filter(is_active=True).update(is_active=False)
     add_effect(community, "post_results", match=match, dedupe_key=f"post_results:{match.pk}")
     schedule_cleanup(match)
     render_board(match)
     render_queue(community)
     try_pop(community)
+
+
+def _announce_strikes(
+    match: Match, player_ids: list[int], before: dict[int, standing.Standing]
+) -> None:
+    """Tell anyone whose clean match just worked a strike off."""
+    after = standing.standings(match.community, player_ids)
+    dropped = [p for p in player_ids if after[p].strikes < before[p].strikes]
+    if not dropped:
+        return
+    policy = standing.strike_policy(match.community)
+    users = dict(Player.objects.filter(pk__in=dropped).values_list("pk", "discord_user_id"))
+    for player_id in dropped:
+        add_effect(
+            match.community,
+            "ping",
+            {
+                "user_ids": [users[player_id]],
+                "text": "clean match: one strike off. "
+                + standing.describe(after[player_id], policy),
+            },
+            match=match,
+        )
