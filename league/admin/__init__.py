@@ -11,12 +11,16 @@ from django.http import HttpRequest
 
 from league.domain.mode_schema import ModeValidationError
 from league.models import (
+    ApiMatchCheck,
+    CaptainOverride,
     CaptainVote,
     Champion,
     Community,
     DraftAction,
     DraftModeVersion,
+    EarlyLeave,
     Match,
+    MatchAward,
     MatchParticipant,
     MatchResource,
     MatchResult,
@@ -24,14 +28,21 @@ from league.models import (
     OutboxEffect,
     Penalty,
     Player,
+    PlayerAlias,
+    PlayerMatchStat,
     PlayerRating,
     QueueEntry,
     RatingEvent,
     RatingRun,
     ResultSubmission,
+    ScoreboardRead,
     Season,
+    StrikeAdjustment,
 )
 from league.services import modes
+
+# The header's "View site" link goes to the staff calibration dashboard.
+admin.site.site_url = "/admin/calibration/"
 
 
 class ReadOnlyAdmin(admin.ModelAdmin):
@@ -108,7 +119,13 @@ class DraftModeVersionAdmin(admin.ModelAdmin):
 
 @admin.register(Community)
 class CommunityAdmin(admin.ModelAdmin):
-    list_display = ("name", "discord_guild_id", "active_mode", "max_concurrent_matches")
+    list_display = (
+        "name",
+        "discord_guild_id",
+        "active_mode",
+        "max_concurrent_matches",
+        "score_ocr",
+    )
 
     def has_delete_permission(self, request: HttpRequest, obj: Any = None) -> bool:
         return False
@@ -120,11 +137,15 @@ class SeasonAdmin(admin.ModelAdmin):
         "name",
         "community",
         "number",
-        "k_factor",
-        "start_rating",
         "started_at",
         "ended_at",
     )
+
+    def get_readonly_fields(self, request: HttpRequest, obj: Any = None) -> tuple[str, ...]:
+        # Rating parameters are fixed once anything is rated: replays must reproduce history.
+        if obj is not None and RatingRun.objects.filter(season=obj).exists():
+            return ("rating_params",)
+        return ()
 
     def has_delete_permission(self, request: HttpRequest, obj: Any = None) -> bool:
         return False
@@ -132,7 +153,14 @@ class SeasonAdmin(admin.ModelAdmin):
 
 @admin.register(Player)
 class PlayerAdmin(admin.ModelAdmin):
-    list_display = ("display_name", "discord_user_id", "steam_account_id", "created_at")
+    list_display = (
+        "display_name",
+        "discord_user_id",
+        "steam_account_id",
+        "steam_name",
+        "steam_verified_at",
+        "created_at",
+    )
     search_fields = ("display_name", "discord_user_id")
     readonly_fields = ("discord_user_id",)
 
@@ -145,14 +173,31 @@ class PlayerAdmin(admin.ModelAdmin):
 
 @admin.register(Penalty)
 class PenaltyAdmin(ReadOnlyAdmin):
-    list_display = ("player", "kind", "tier", "starts_at", "expires_at", "revoked_at")
+    list_display = (
+        "player",
+        "kind",
+        "tier",
+        "strikes",
+        "strikes_waived",
+        "starts_at",
+        "expires_at",
+        "revoked_at",
+    )
     list_filter = ("kind",)
     search_fields = ("player__display_name",)
 
 
 class ParticipantInline(ReadOnlyInline):
     model = MatchParticipant
-    fields = ("player", "team", "is_captain", "draft_pick_number", "ready_at", "removed_reason")
+    fields = (
+        "player",
+        "team",
+        "is_captain",
+        "draft_pick_number",
+        "ready_at",
+        "removed_reason",
+        "left_early",
+    )
 
 
 class DraftActionInline(ReadOnlyInline):
@@ -197,7 +242,17 @@ class MatchAdmin(ReadOnlyAdmin):
 
 @admin.register(PlayerRating)
 class PlayerRatingAdmin(ReadOnlyAdmin):
-    list_display = ("player", "season", "rating", "games", "wins", "losses", "last_played_at")
+    list_display = (
+        "player",
+        "season",
+        "rating",
+        "mu",
+        "sigma",
+        "games",
+        "wins",
+        "losses",
+        "last_played_at",
+    )
     list_filter = ("season",)
     search_fields = ("player__display_name",)
     ordering = ("-rating",)
@@ -211,7 +266,17 @@ class RatingRunAdmin(ReadOnlyAdmin):
 
 @admin.register(RatingEvent)
 class RatingEventAdmin(ReadOnlyAdmin):
-    list_display = ("id", "player", "match", "delta", "rating_after", "expected", "created_at")
+    list_display = (
+        "id",
+        "player",
+        "match",
+        "delta",
+        "rating_after",
+        "mu_delta",
+        "award_adj",
+        "expected",
+        "created_at",
+    )
     search_fields = ("player__display_name",)
 
 
@@ -234,3 +299,73 @@ class MatchResourceAdmin(ReadOnlyAdmin):
 class OutboxEffectAdmin(ReadOnlyAdmin):
     list_display = ("id", "kind", "match", "status", "attempts", "run_after", "last_error")
     list_filter = ("status", "kind")
+
+
+@admin.register(ScoreboardRead)
+class ScoreboardReadAdmin(ReadOnlyAdmin):
+    list_display = ("id", "match", "status", "ocr_winner", "ocr_match_id", "badges_clean")
+    list_filter = ("status",)
+
+
+@admin.register(PlayerMatchStat)
+class PlayerMatchStatAdmin(ReadOnlyAdmin):
+    list_display = (
+        "match",
+        "ocr_name",
+        "player",
+        "team",
+        "hero_name",
+        "badge",
+        "kills",
+        "deaths",
+        "assists",
+        "player_damage",
+        "map_source",
+    )
+    search_fields = ("ocr_name", "player__display_name")
+
+
+@admin.register(MatchAward)
+class MatchAwardAdmin(ReadOnlyAdmin):
+    list_display = ("match", "revision", "player", "kind", "source", "actor", "created_at")
+    list_filter = ("source", "kind")
+
+
+@admin.register(PlayerAlias)
+class PlayerAliasAdmin(admin.ModelAdmin):
+    """In-game names. Staff can confirm or remove a wrong one."""
+
+    list_display = ("name", "player", "confirmed", "times_seen", "last_seen_at")
+    list_filter = ("confirmed",)
+    search_fields = ("name", "player__display_name")
+
+
+@admin.register(StrikeAdjustment)
+class StrikeAdjustmentAdmin(ReadOnlyAdmin):
+    list_display = ("player", "delta", "actor", "reason", "created_at")
+
+
+@admin.register(CaptainOverride)
+class CaptainOverrideAdmin(ReadOnlyAdmin):
+    list_display = ("player", "status", "actor", "reason", "created_at")
+    list_filter = ("status",)
+
+
+@admin.register(ApiMatchCheck)
+class ApiMatchCheckAdmin(ReadOnlyAdmin):
+    list_display = (
+        "match",
+        "deadlock_match_id",
+        "attempt",
+        "status",
+        "api_winner",
+        "duration_s",
+        "created_at",
+    )
+    list_filter = ("status",)
+
+
+@admin.register(EarlyLeave)
+class EarlyLeaveAdmin(ReadOnlyAdmin):
+    list_display = ("match", "leaver", "requested_by", "status", "resolved_by", "created_at")
+    list_filter = ("status",)

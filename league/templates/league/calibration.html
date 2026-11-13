@@ -1,0 +1,134 @@
+{% extends "admin/base_site.html" %}
+{% block title %}Rating calibration | {{ site_title }}{% endblock %}
+
+{% block extrastyle %}
+<style>
+  .viz-root {
+    color-scheme: light;
+    --series-1: #2a78d6;
+    --reference: #8a8984;
+    --grid: rgba(0, 0, 0, 0.08);
+    --tile-bg: var(--darkened-bg, #f8f8f8);
+    --good: #008300;
+    --warn: #b06d00;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:where(:not([data-theme="light"])) .viz-root {
+      color-scheme: dark;
+      --series-1: #3987e5;
+      --reference: #8f8e88;
+      --grid: rgba(255, 255, 255, 0.10);
+      --good: #3fb950;
+      --warn: #e0a23c;
+    }
+  }
+  :root[data-theme="dark"] .viz-root {
+    color-scheme: dark;
+    --series-1: #3987e5;
+    --reference: #8f8e88;
+    --grid: rgba(255, 255, 255, 0.10);
+    --good: #3fb950;
+    --warn: #e0a23c;
+  }
+  .viz-root { max-width: 1100px; }
+  .viz-root .lede { color: var(--body-quiet-color); max-width: 72ch; }
+  .viz-root form.pick { display: flex; flex-wrap: wrap; gap: 12px; align-items: end; margin: 16px 0 24px; }
+  .viz-root form.pick label { display: flex; flex-direction: column; gap: 4px; font-weight: 600; }
+  .viz-root form.pick input[type=text] { width: min(420px, 80vw); font-family: monospace; }
+  .viz-root .error { color: var(--error-fg, #ba2121); }
+  .viz-root .tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 12px; margin: 12px 0 24px; }
+  .viz-root .tile { background: var(--tile-bg); border: 1px solid var(--hairline-color); border-radius: 8px; padding: 12px 14px; }
+  .viz-root .tile .label { color: var(--body-quiet-color); font-size: 12px; }
+  .viz-root .tile .value { font-size: 26px; font-weight: 600; color: var(--body-fg); font-variant-numeric: tabular-nums; }
+  .viz-root .tile .note { color: var(--body-quiet-color); font-size: 12px; }
+  .viz-root .tile .note .good { color: var(--good); font-weight: 600; }
+  .viz-root .tile .note .warn { color: var(--warn); font-weight: 600; }
+  .viz-root .charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 24px; }
+  .viz-root figure { margin: 0; }
+  .viz-root figcaption { color: var(--body-quiet-color); font-size: 12px; margin-top: 4px; }
+  .viz-root svg.viz { width: 100%; height: auto; display: block; }
+  .viz-root svg .grid { stroke: var(--grid); stroke-width: 1; }
+  .viz-root svg .reference { stroke: var(--reference); stroke-width: 1.5; stroke-dasharray: 4 4; }
+  .viz-root svg .tick, .viz-root svg .axis { fill: var(--body-quiet-color); font-size: 13px; }
+  .viz-root svg .axis { font-size: 14px; }
+  .viz-root svg .dot { fill: var(--series-1); stroke: var(--body-bg); stroke-width: 2; }
+  .viz-root svg .whisker { stroke: var(--series-1); stroke-width: 2; stroke-linecap: round; opacity: 0.55; }
+  .viz-root svg .bar { fill: var(--series-1); }
+  .viz-root svg .hit { fill: transparent; }
+  .viz-root svg .mark:hover .dot, .viz-root svg .mark:focus .dot { r: 7; }
+  .viz-root svg .mark:hover .bar, .viz-root svg .mark:focus .bar { opacity: 0.8; }
+  .viz-root svg .mark:focus { outline: none; }
+  .viz-root .tip { position: fixed; pointer-events: none; background: var(--body-bg); color: var(--body-fg);
+    border: 1px solid var(--hairline-color); border-radius: 6px; padding: 6px 8px; font-size: 12px;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15); max-width: 300px; display: none; z-index: 10; }
+  .viz-root table { margin-top: 8px; }
+  .viz-root td.num, .viz-root th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .viz-root details { margin: 8px 0 24px; }
+  .viz-root h2 { margin-top: 28px; }
+  .viz-root .side { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 24px; }
+</style>
+{% endblock %}
+
+{% block breadcrumbs %}
+<div class="breadcrumbs"><a href="{% url 'admin:index' %}">Home</a> &rsaquo; Rating calibration</div>
+{% endblock %}
+
+{% block content %}
+<div class="viz-root">
+  <p class="lede">How well ratings predict results, from a replay of the season in memory. Nothing
+  here writes anything. With few games these numbers are noisy: at 200 matches a side check is good
+  to about plus or minus 7 points, so act only on large, consistent differences.</p>
+
+  <form class="pick" method="get">
+    <label>Season
+      <select name="season">
+        {% for s in seasons %}
+        <option value="{{ s.pk }}" {% if season and s.pk == season.pk %}selected{% endif %}>
+          {{ s.community.name }}: {{ s }}{% if not s.ended_at %} (open){% endif %}
+        </option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>Compare candidate parameters (JSON, optional)
+      <input type="text" name="params" value="{{ params_text }}" placeholder='{"beta": 3.5}'>
+    </label>
+    <input type="submit" value="Show">
+    {% if params_error %}<span class="error">{{ params_error }}</span>{% endif %}
+  </form>
+
+  {% if not season %}
+    <p>No season yet.</p>
+  {% else %}
+    {% include "league/calibration_report.html" with view=live heading="Live parameters" %}
+    {% if candidate %}
+      {% include "league/calibration_report.html" with view=candidate heading="Candidate parameters" %}
+    {% endif %}
+  {% endif %}
+  <div class="tip" role="tooltip"></div>
+</div>
+
+<script>
+  (function () {
+    const root = document.querySelector(".viz-root");
+    const tip = root.querySelector(".tip");
+    function show(event) {
+      const mark = event.target.closest(".mark");
+      if (!mark) return;
+      tip.textContent = mark.dataset.tip;
+      tip.style.display = "block";
+      const box = mark.getBoundingClientRect();
+      const x = event.clientX || box.left + box.width / 2;
+      const y = event.clientY || box.top;
+      tip.style.left = Math.min(x + 12, window.innerWidth - tip.offsetWidth - 8) + "px";
+      tip.style.top = Math.max(y - tip.offsetHeight - 12, 8) + "px";
+    }
+    function hide(event) {
+      if (event.target.closest(".mark")) tip.style.display = "none";
+    }
+    root.addEventListener("mousemove", show);
+    root.addEventListener("focusin", show);
+    root.addEventListener("mouseout", hide);
+    root.addEventListener("focusout", hide);
+  })();
+</script>
+{% endblock %}
