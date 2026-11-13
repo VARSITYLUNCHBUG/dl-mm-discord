@@ -16,6 +16,7 @@ NOT_MODES = frozenset({"champions.yaml", "champion_emojis.yaml"})
 def publish_presets() -> None:
     """Seed the champions and publish every preset draft mode, as `load_presets` does."""
     champions.seed_from_file(PRESETS / "champions.yaml")
+    champions.load_unicode_emojis(PRESETS / "champion_emojis.yaml")
     for path in sorted(PRESETS.glob("*.yaml")):
         if path.name not in NOT_MODES:
             modes.publish(modes.load_yaml(path))
@@ -55,6 +56,9 @@ def clock(monkeypatch: pytest.MonkeyPatch) -> Clock:
         effects,
         lobby,
         penalties,
+        pings,
+        prio,
+        quickdraft,
         results,
         subs,
     )
@@ -68,6 +72,9 @@ def clock(monkeypatch: pytest.MonkeyPatch) -> Clock:
         effects,
         lobby,
         penalties,
+        pings,
+        prio,
+        quickdraft,
         queue_service,
         ratings_service,
         results,

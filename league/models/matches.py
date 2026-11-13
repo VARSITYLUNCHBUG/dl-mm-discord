@@ -97,6 +97,9 @@ class MatchParticipant(models.Model):
     # Blank means the player is on the roster. Rated rosters are `team` set and this blank.
     removed_reason = models.CharField(max_length=16, choices=RemovedReason.choices, blank=True)
     removed_at = models.DateTimeField(null=True, blank=True)
+    # When they were first in one of the match's voice channels. Until then, joining the Waiting
+    # Room moves them in; after that, where they go in voice is up to them.
+    voice_joined_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         db_table = "match_participants"

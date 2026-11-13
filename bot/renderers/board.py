@@ -9,11 +9,12 @@ import discord
 from discord import ButtonStyle, SelectOption
 from discord.ui import ActionRow, Container, LayoutView, MediaGallery, Separator, TextDisplay
 
+from bot.renderers import bebot
 from bot.routing import RouteButton, RouteSelect
 from league.domain.engine import Status
 from league.models.subs import SubStatus
 from league.services import dev
-from league.services.boards import BoardState, ChampionOption, PlayerLine, SubLine
+from league.services.boards import BoardState, ChampionOption, DraftLine, PlayerLine, SubLine
 from league.services.subs import OfferInfo
 
 # Discord caps a string select at 25 options, and an action row at 5 buttons.
@@ -91,7 +92,7 @@ def _team_heading(state: BoardState, team: str, lines: list[PlayerLine]) -> str:
     average = sum(line.rating for line in lines) // len(lines)
     side = ""
     if state.hidden_king_team:
-        side = " · Hidden King" if state.hidden_king_team == team else " · The Archmother"
+        side = f" · {bebot.side_name(state.side_of(team))}"
     return f"**{state.team_name(team)}**{side} · avg {average}"
 
 
@@ -103,29 +104,92 @@ def _team_block(state: BoardState, team: str) -> str:
     return f"{_team_heading(state, team, lines)}\n" + "\n".join(rows)
 
 
-def _team_line(state: BoardState, team: str) -> str:
-    """A whole team on one line, so the champion grid stays on screen."""
-    lines = _team(state, team)
-    if not lines:
-        return f"**{state.team_name(team)}**"
-    names = ", ".join(f"{'👑 ' if line.is_captain else ''}{line.name}" for line in lines)
-    return f"{_team_heading(state, team, lines)}: {names}"
-
-
-def _picks(state: BoardState, action: str, team: str | None = None) -> str:
-    labels = [
-        ("⏱ " if line.auto else "🎲 " if line.random_choice else "") + line.label
-        for line in state.actions
-        if line.action == action and (team is None or line.team == team)
-    ]
-    return ", ".join(labels) if labels else "-"
+# Phases whose timer sits on the acting captain's line, as Bebot showed it.
+_TIMER_ON_CAPTAIN = frozenset({Status.PLAYER_DRAFT, Status.CHAMPION_DRAFT})
+_DRAFT_TITLED = frozenset({Status.CHAMPION_DRAFT, Status.LOBBY_CODE})
 
 
 def _header(state: BoardState) -> str:
+    if state.status in _DRAFT_TITLED:
+        line = f"## {bebot.draft_title(state.match_id, state.draft_name)}"
+        paused = countdown(state) if state.on_hold else ""
+        return f"{line}\n{paused}" if paused else line
     title = STATUS_TITLES.get(state.status, state.status)
-    timer = countdown(state)
+    timer = "" if state.status in _TIMER_ON_CAPTAIN and not state.on_hold else countdown(state)
     line = f"## Match #{state.match_id}: {title}"
     return f"{line}\n{timer}" if timer else line
+
+
+def _mention(line: PlayerLine) -> str:
+    return player_mention(line.discord_user_id, line.name)
+
+
+def _captains_block(state: BoardState, teams: tuple[str, str], verb: str, noun: str) -> str:
+    """Bebot's 👑 Captains block: the captain on the clock is mentioned with what to do."""
+    rows = [f"{bebot.CAPTAIN_EMOJI} **{bebot.CAPTAINS_SUMMARY}**"]
+    for team in teams:
+        captain = state.captain_line(team)
+        if captain is None:
+            continue
+        prefix = f"{bebot.side_emoji(state.side_of(team))} " if state.hidden_king_team else ""
+        if team == state.acting_team and verb and not state.on_hold:
+            timer = bebot.countdown(state.deadline_at)
+            rows.append(f"{prefix}{_mention(captain)} {verb} a {noun}!{timer}")
+        else:
+            rows.append(f"{prefix}{captain.name}")
+    return "\n".join(rows)
+
+
+def _side_order(state: BoardState) -> tuple[str, str]:
+    """Hidden King first, as Bebot listed the sides."""
+    hidden_king = state.hidden_king_team or "A"
+    return (hidden_king, "B" if hidden_king == "A" else "A")
+
+
+def _hero_text(line: DraftLine) -> str:
+    emoji = bebot.hero_emoji_text(line.label, line.emoji_id, line.unicode_emoji)
+    return bebot.hero_line(emoji, line.label, random_choice=line.random_choice, auto=line.auto)
+
+
+def _heroes(state: BoardState, action: str, team: str | None = None) -> str:
+    return bebot.hero_list(
+        [
+            _hero_text(line)
+            for line in state.actions
+            if line.action == action and (team is None or line.team == team)
+        ]
+    )
+
+
+def _roster(state: BoardState, team: str) -> str:
+    names = " · ".join(
+        f"{'👑 ' if line.is_captain else ''}{line.name}" for line in _team(state, team)
+    )
+    return f"-# {names}" if names else ""
+
+
+def _draft_summary(state: BoardState) -> str:
+    """Bebot's draft message: captains, bans, then each side's heroes."""
+    teams = _side_order(state)
+    current = state.status == Status.CHAMPION_DRAFT
+    verb = state.step_action if current else ""
+    parts = [
+        _captains_block(state, teams, verb, "hero"),
+        "",
+        f"{bebot.BAN_EMOJI} **{bebot.BANS_SUMMARY}**",
+        _heroes(state, "ban"),
+    ]
+    for team in teams:
+        side = state.side_of(team)
+        parts += ["", f"{bebot.side_emoji(side)} **{bebot.side_name(side)}**"]
+        roster = _roster(state, team)
+        if roster:
+            parts.append(roster)
+        parts.append(_heroes(state, "pick", team))
+    if current and state.champion_steps:
+        steps = [(action, state.side_of(team)) for action, team in state.champion_steps]
+        parts += ["", bebot.timeline_block(steps, state.champion_step_index)]
+    return "\n".join(parts)
 
 
 def _chunks(items: list[Any], size: int = SELECT_LIMIT) -> list[list[Any]]:
@@ -172,12 +236,15 @@ def _captain_vote(state: BoardState, box: Container[Any]) -> None:
 
 
 def _player_draft(state: BoardState, box: Container[Any]) -> None:
-    box.add_item(TextDisplay(_team_block(state, "A") + "\n\n" + _team_block(state, "B")))
+    acting = state.acting_team or "A"
+    teams = (acting, "B" if acting == "A" else "A")
+    box.add_item(TextDisplay(_captains_block(state, teams, "pick", "player")))
+    progress = f"Pick {state.turn_position} of {state.turn_total}." if state.turn_total > 1 else ""
+    hint = f"{progress}{_next_up(state)}".strip()
+    if hint:
+        box.add_item(TextDisplay(f"-# {hint}"))
     box.add_item(Separator())
-    progress = f" ({state.turn_position} of {state.turn_total})" if state.turn_total > 1 else ""
-    box.add_item(
-        TextDisplay(f"**{state.acting_captain_name}** is picking{progress}.{_next_up(state)}")
-    )
+    box.add_item(TextDisplay(_team_block(state, "A") + "\n\n" + _team_block(state, "B")))
     # Drafted players stay in place, greyed out: a double click can't land on the next name.
     pool = [player for player in state.players if not player.is_captain]
     if not any(not player.team for player in pool):
@@ -191,7 +258,7 @@ def _side_select(state: BoardState, box: Container[Any]) -> None:
     box.add_item(Separator())
     box.add_item(
         TextDisplay(
-            "Captains: claim a side. **Hidden King bans and picks first.** "
+            f"Captains: claim a side. **{bebot.HIDDEN_KING} bans and picks first.** "
             "The first claim decides both sides; if nobody claims, it's a coin flip."
         )
     )
@@ -201,17 +268,17 @@ def _side_select(state: BoardState, box: Container[Any]) -> None:
                 "claim_side",
                 state.match_id,
                 "hk",
-                label="Become Hidden King captain",
+                label=f"Become {bebot.HIDDEN_KING} Captain",
                 style=ButtonStyle.danger,
-                emoji=discord.PartialEmoji(name="🔶"),
+                emoji=discord.PartialEmoji(name=bebot.HK_EMOJI),
             ),
             RouteButton(
                 "claim_side",
                 state.match_id,
                 "am",
-                label="Become Archmother captain",
+                label=f"Become {bebot.ARCHMOTHER} Captain",
                 style=ButtonStyle.primary,
-                emoji=discord.PartialEmoji(name="🔷"),
+                emoji=discord.PartialEmoji(name=bebot.AM_EMOJI),
             ),
         )
     )
@@ -236,18 +303,17 @@ def _player_button(state: BoardState, player: PlayerLine) -> RouteButton:
 
 
 def _champion_emoji(champion: ChampionOption) -> discord.PartialEmoji | None:
-    return discord.PartialEmoji(name="c", id=champion.emoji_id) if champion.emoji_id else None
+    return bebot.hero_partial_emoji(champion.emoji_id, champion.unicode_emoji)
 
 
 def _champion_button(state: BoardState, champion: ChampionOption) -> RouteButton:
-    # The colour says what a click does. Taken champions stay in place, so the grid never shifts.
-    available = ButtonStyle.danger if state.step_action == "ban" else ButtonStyle.success
+    # Bebot's grey hero buttons. Taken champions stay in place, greyed out, so nothing shifts.
     return RouteButton(
         "choose_champion",
         state.match_id,
         f"{state.step_index}.{champion.id}",
         label=champion.name[:80],
-        style=ButtonStyle.secondary if champion.taken else available,
+        style=ButtonStyle.secondary,
         disabled=champion.taken,
         emoji=_champion_emoji(champion),
     )
@@ -284,20 +350,12 @@ def _champion_selects(state: BoardState) -> list[ActionRow[Any]]:
 
 
 def _champion_draft(state: BoardState, box: Container[Any]) -> None:
-    box.add_item(TextDisplay(_team_line(state, "A") + "\n" + _team_line(state, "B")))
-    box.add_item(Separator())
-    box.add_item(
-        TextDisplay(
-            f"**Bans:** {_picks(state, 'ban')}\n"
-            f"**{state.team_name('A')} picks:** {_picks(state, 'pick', 'A')}\n"
-            f"**{state.team_name('B')} picks:** {_picks(state, 'pick', 'B')}"
-        )
-    )
-    verb, noun = ("banning", "ban") if state.step_action == "ban" else ("picking", "pick")
-    progress = f": {noun} {state.turn_position} of {state.turn_total}" if state.turn_total else ""
-    box.add_item(
-        TextDisplay(f"**{state.acting_captain_name}** is {verb}{progress}.{_next_up(state)}")
-    )
+    box.add_item(TextDisplay(_draft_summary(state)))
+    noun = "Ban" if state.step_action == "ban" else "Pick"
+    progress = f"{noun} {state.turn_position} of {state.turn_total}." if state.turn_total else ""
+    hint = f"{progress}{_next_up(state)}".strip()
+    if hint:
+        box.add_item(TextDisplay(f"-# {hint}"))
 
 
 def _random_button(state: BoardState) -> RouteButton:
@@ -320,8 +378,17 @@ def render_pickers(state: BoardState) -> list[LayoutView]:
     if state.status != Status.CHAMPION_DRAFT or state.on_hold:
         return []
     rows = [*_champion_rows(state, state.champions), ActionRow(_random_button(state))]
-    if len(rows) > ROWS_PER_GRID_MESSAGE * GRID_MESSAGES:
+    if not grid_fits(rows):
         rows = [*_champion_selects(state), ActionRow(_random_button(state))]
+    return grid_messages(rows)
+
+
+def grid_fits(rows: list[ActionRow[Any]]) -> bool:
+    return len(rows) <= ROWS_PER_GRID_MESSAGE * GRID_MESSAGES
+
+
+def grid_messages(rows: list[ActionRow[Any]]) -> list[LayoutView]:
+    """Split a grid's rows into its messages, balanced. Also used by /startdraft."""
     messages = -(-len(rows) // ROWS_PER_GRID_MESSAGE)
     per_message = -(-len(rows) // messages)  # Balanced, so neither half looks like an afterthought.
     views = []
@@ -333,25 +400,17 @@ def render_pickers(state: BoardState) -> list[LayoutView]:
     return views
 
 
-def _final_draft_summary(state: BoardState) -> str:
-    return (
-        _team_block(state, "A")
-        + f"\nChampions: {_picks(state, 'pick', 'A')}\n\n"
-        + _team_block(state, "B")
-        + f"\nChampions: {_picks(state, 'pick', 'B')}\n\n"
-        + f"**Bans:** {_picks(state, 'ban')}"
-    )
-
-
 def _lobby_code(state: BoardState, box: Container[Any]) -> None:
-    # The draft ends with a name, the summary, a GIF and GLHF.
-    box.add_item(TextDisplay(f"### 🏆 Draft: {state.draft_name} 🏆"))
-    box.add_item(TextDisplay(_final_draft_summary(state)))
+    # Bebot's finished draft: the summary, # GLHF and a GIF.
+    box.add_item(TextDisplay(_draft_summary(state) + "\n\n# GLHF"))
     if state.gif_url:
         box.add_item(MediaGallery(discord.MediaGalleryItem(state.gif_url)))
-    box.add_item(TextDisplay("# GLHF"))
     box.add_item(Separator())
-    box.add_item(TextDisplay(f"**{state.host_name}** hosts: create the custom lobby.\n{CHECKLIST}"))
+    timer = "" if state.on_hold else countdown(state)
+    due = f"\n{timer}" if timer else ""
+    box.add_item(
+        TextDisplay(f"**{state.host_name}** hosts: create the custom lobby.\n{CHECKLIST}{due}")
+    )
     box.add_item(
         ActionRow(
             RouteButton(
@@ -364,7 +423,8 @@ def _lobby_code(state: BoardState, box: Container[Any]) -> None:
 def _in_progress(state: BoardState, box: Container[Any]) -> None:
     box.add_item(TextDisplay(f"### Lobby code: `{state.lobby_code}`"))
     box.add_item(Separator())
-    box.add_item(TextDisplay(_final_draft_summary(state)))
+    title = bebot.draft_title(state.match_id, state.draft_name)
+    box.add_item(TextDisplay(f"### {title}\n{_draft_summary(state)}"))
     box.add_item(Separator())
     box.add_item(TextDisplay("Captains: when the game ends, press the team that won."))
     box.add_item(
@@ -476,6 +536,11 @@ _SECTIONS = {
 def _accent(state: BoardState) -> int:
     if state.on_hold:
         return ACCENT_ATTENTION
+    # Bebot coloured the draft by the side on the clock, and kept the last side's colour after.
+    if state.status == Status.CHAMPION_DRAFT and state.acting_team:
+        return bebot.side_colour(state.side_of(state.acting_team))
+    if state.status == Status.LOBBY_CODE and state.champion_steps:
+        return bebot.side_colour(state.side_of(state.champion_steps[-1][1]))
     if state.status == Status.COMPLETED:
         return ACCENT_DONE
     if state.status == Status.VOIDED:

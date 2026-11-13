@@ -62,6 +62,8 @@ class DraftLine:
     label: str
     auto: bool
     random_choice: bool = False
+    emoji_id: int | None = None
+    unicode_emoji: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,6 +89,7 @@ class ChampionOption:
     name: str
     emoji_id: int | None = None
     taken: bool = False  # Banned or picked. It stays on the grid, so nothing shifts.
+    unicode_emoji: str = ""
 
 
 @dataclass(slots=True)
@@ -127,6 +130,9 @@ class BoardState:
     # The draft summary: a name for the draft and a GIF.
     draft_name: str = ""
     gif_url: str | None = None
+    # Bebot's turn strip: (action, team) for each ban and pick, and which one is on the clock.
+    champion_steps: list[tuple[str, str]] = field(default_factory=list)
+    champion_step_index: int | None = None
 
     @property
     def hold_until(self) -> datetime | None:
@@ -140,6 +146,13 @@ class BoardState:
 
     def team_name(self, team: str) -> str:
         return team_name(self.captains.get(team, "Captain"))
+
+    def side_of(self, team: str) -> str:
+        """Bebot's side key for a team: "hk" for Hidden King, "am" for the Archmother."""
+        return "hk" if team == self.hidden_king_team else "am"
+
+    def captain_line(self, team: str) -> PlayerLine | None:
+        return next((p for p in self.players if p.is_captain and p.team == team), None)
 
 
 def _turn_progress(plan: tuple[PlanStep, ...], index: int) -> tuple[int, int]:
@@ -202,23 +215,48 @@ def board_state(match_id: int) -> BoardState:
     if match.lobby_code_host is not None:
         state.host_name = match.lobby_code_host.display_name
 
-    champion_names = dict(Champion.objects.values_list("pk", "name"))
+    champion_rows = {
+        pk: (name, emoji_id, unicode_emoji)
+        for pk, name, emoji_id, unicode_emoji in Champion.objects.values_list(
+            "pk", "name", "discord_emoji_id", "unicode_emoji"
+        )
+    }
     actions = match.draft_actions.select_related("target_player").order_by("step_index")
     for action in actions:
+        emoji_id: int | None = None
+        unicode_emoji = ""
         if action.target_player is not None:
             label = action.target_player.display_name
         elif action.target_champion_id is not None:
-            label = champion_names.get(action.target_champion_id, str(action.target_champion_id))
+            label, emoji_id, unicode_emoji = champion_rows.get(
+                action.target_champion_id, (str(action.target_champion_id), None, "")
+            )
         else:
             label = "skipped"
         state.actions.append(
             DraftLine(
-                action.action, action.team, label, action.source == "timeout", action.random_choice
+                action.action,
+                action.team,
+                label,
+                action.source == "timeout",
+                action.random_choice,
+                emoji_id,
+                unicode_emoji,
             )
         )
 
     plan = build_plan(mode)
     state.steps_total = len(plan)
+    if match.champion_first_pick:
+        champion_plan = [step for step in plan if step.action != "player_pick"]
+        state.champion_steps = [
+            (step.action, team_for_role(step.role, match.champion_first_pick))
+            for step in champion_plan
+        ]
+        if match.status == Status.CHAMPION_DRAFT:
+            indexes = [step.index for step in champion_plan]
+            if match.step_index in indexes:
+                state.champion_step_index = indexes.index(match.step_index)
     if match.status in {Status.PLAYER_DRAFT, Status.CHAMPION_DRAFT} and match.step_index < len(
         plan
     ):
@@ -240,7 +278,10 @@ def board_state(match_id: int) -> BoardState:
         )
         rows = Champion.objects.filter(pk__in=match.champion_pool).order_by("name")
         state.champions = [
-            ChampionOption(row.pk, row.name, row.discord_emoji_id, row.pk in used) for row in rows
+            ChampionOption(
+                row.pk, row.name, row.discord_emoji_id, row.pk in used, row.unicode_emoji
+            )
+            for row in rows
         ]
 
     report = match.submissions.filter(verdict="report").select_related("captain").first()

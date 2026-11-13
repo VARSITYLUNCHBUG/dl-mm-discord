@@ -13,25 +13,32 @@ import discord
 from discord import app_commands
 from django.conf import settings
 
-from bot.commands import player, setup, staff
+from bot import voice
+from bot.commands import community as community_commands
+from bot.commands import drafts, player, setup, staff
 from bot.db import db
 from bot.effects.gateway import DiscordGateway
 from bot.effects.worker import EffectWorker
+from bot.error_log import discord_log_handler
 
 # Importing the handlers registers them with the router.
 from bot.handlers import draft as _draft  # noqa: F401
 from bot.handlers import lobby as _lobby  # noqa: F401
 from bot.handlers import queue as _queue  # noqa: F401
+from bot.handlers import quickdraft as _quickdraft  # noqa: F401
 from bot.handlers import results as _results  # noqa: F401
 from bot.handlers import subs as _subs  # noqa: F401
 from bot.routing import RouteButton, RouteSelect, RouteUserSelect
-from league.services import deadlines, effects
+from league.services import community as community_service
+from league.services import deadlines, effects, pings, prio
 
 logger = logging.getLogger(__name__)
 
 DEADLINE_INTERVAL_SECONDS = 1.0
 EFFECT_IDLE_SECONDS = 0.5
 PRUNE_INTERVAL_SECONDS = 24 * 3600
+# The priority list shows wait times in minutes, so it's re-rendered this often.
+PRIO_REFRESH_SECONDS = 60
 
 
 class DraftBot(discord.Client):
@@ -72,6 +79,8 @@ class DraftBot(discord.Client):
             setup.setup_command,
             *staff.GROUPS,
             *staff.COMMANDS,
+            *drafts.COMMANDS,
+            *community_commands.COMMANDS,
         )
         for command in commands:
             self.tree.add_command(command)
@@ -87,10 +96,13 @@ class DraftBot(discord.Client):
         if self._started:
             return  # on_ready fires again after reconnects.
         self._started = True
+        discord_log_handler.set_channels(await db(pings.error_channels))
+        discord_log_handler.bind(self, asyncio.get_running_loop())
         extended = await db(deadlines.extend_past_due)
         logger.info("Startup grace applied", extra={"extended": extended})
         await db(effects.request_reconcile)
         await self._sweep_stale_channels()
+        await self._reconcile_prio()
         self._tasks = [
             asyncio.create_task(self._deadline_loop(), name="deadlines"),
             asyncio.create_task(self._effect_loop(), name="effects"),
@@ -105,14 +117,31 @@ class DraftBot(discord.Client):
             except discord.HTTPException:
                 logger.exception("Sweep failed", extra={"match": match_id, "channel": channel_id})
 
+    async def _reconcile_prio(self) -> None:
+        """Catch the priority list up with voice changes missed while the bot was down."""
+        for community in await db(prio.tracked_communities):
+            guild = self.get_guild(community.discord_guild_id)
+            if guild is None:
+                continue
+            try:
+                waiting = voice.members_in(guild, community.waiting_room_channel_id)
+                await db(prio.reconcile, community.pk, waiting)
+            except Exception:
+                logger.exception("Priority list catch-up failed", extra={"guild": guild.id})
+
     async def _deadline_loop(self) -> None:
         last_prune = time.monotonic()
+        last_prio = time.monotonic()
         while True:
             try:
                 fired = await db(deadlines.tick)
                 if fired:
                     self.wake_effects()
                 settings.BOT_HEARTBEAT_FILE.touch()
+                if time.monotonic() - last_prio > PRIO_REFRESH_SECONDS:
+                    last_prio = time.monotonic()
+                    if await db(prio.refresh_all):
+                        self.wake_effects()
                 if time.monotonic() - last_prune > PRUNE_INTERVAL_SECONDS:
                     last_prune = time.monotonic()
                     await db(effects.prune_finished)
@@ -144,6 +173,8 @@ class DraftBot(discord.Client):
         self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState
     ) -> None:
         """Joining the Waiting Room after your lobby popped moves you straight into it."""
+        if before.channel != after.channel:
+            await self._prio_voice(member, before, after)
         channel = after.channel
         if channel is None or before.channel == channel:
             return
@@ -154,6 +185,27 @@ class DraftBot(discord.Client):
         except Exception:
             logger.exception("Auto-move failed", extra={"user": member.id})
 
+    async def _prio_voice(
+        self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState
+    ) -> None:
+        """The priority list follows the Waiting Room."""
+        try:
+            community = await db(community_service.get, member.guild.id)
+            if community is None or not community.waiting_room_channel_id:
+                return
+            changed = await db(
+                prio.on_voice_state,
+                community.pk,
+                member.id,
+                member.display_name,
+                before.channel.id if before.channel else None,
+                after.channel.id if after.channel else None,
+            )
+            if changed:
+                self.wake_effects()
+        except Exception:
+            logger.exception("Priority list update failed", extra={"user": member.id})
+
 
 def run() -> None:
     if not settings.DISCORD_TOKEN:
@@ -162,6 +214,7 @@ def run() -> None:
     # waited out the grace period and then killed it. Treat SIGTERM like Ctrl+C: discord.py then
     # closes the connection cleanly, and any effect cut short stays pending and runs on restart.
     signal.signal(signal.SIGTERM, _stop_on_sigterm)
+    logging.getLogger().addHandler(discord_log_handler)  # Posts to /seterrorchannel channels.
     DraftBot().run(settings.DISCORD_TOKEN, log_handler=None)
 
 

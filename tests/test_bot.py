@@ -254,7 +254,7 @@ def test_champion_grid_has_messages_of_its_own_below_the_board(popped: Match) ->
 def test_a_taken_champion_stays_in_place_greyed_out(popped: Match) -> None:
     match = to_champion_draft(popped)
     before = grid_buttons(boards.board_state(match.pk))
-    assert {button["style"] for button in before} == {discord.ButtonStyle.danger.value}  # Bans.
+    assert {button["style"] for button in before} == {discord.ButtonStyle.secondary.value}
 
     step = build_plan(mode_of(match))[match.step_index]
     captain = captain_of(match, team_for_role(step.role, match.champion_first_pick)).player
@@ -271,7 +271,7 @@ def test_a_taken_champion_stays_in_place_greyed_out(popped: Match) -> None:
 
 
 @pytest.mark.django_db
-def test_champion_buttons_turn_green_on_a_pick(popped: Match) -> None:
+def test_champion_buttons_stay_bebot_grey_on_a_pick(popped: Match) -> None:
     match = to_champion_draft(popped)
     plan = build_plan(mode_of(match))
     while plan[match.step_index].action != "pick":
@@ -283,7 +283,7 @@ def test_champion_buttons_turn_green_on_a_pick(popped: Match) -> None:
     styles = {
         b["style"] for b in grid_buttons(boards.board_state(match.pk)) if not b.get("disabled")
     }
-    assert styles == {discord.ButtonStyle.success.value}
+    assert styles == {discord.ButtonStyle.secondary.value}
 
 
 @pytest.mark.django_db
@@ -291,7 +291,11 @@ def test_champion_board_says_how_far_along_the_draft_is(popped: Match) -> None:
     match = to_champion_draft(popped)
     state = boards.board_state(match.pk)
     payload = str(render_board(state).to_components())
-    assert f"**{state.acting_captain_name}** is banning: ban 1 of 4." in payload
+    captain = next(p for p in state.players if p.is_captain and p.team == state.acting_team)
+    # Bebot's captain line, with the countdown Discord keeps ticking.
+    assert f"🔶 <@{captain.discord_user_id}> ban a hero! ⌛ <t:" in payload
+    assert "Ban 1 of 4." in payload
+    assert "[🔶]" in payload  # The turn strip marks the current turn.
 
 
 @pytest.mark.django_db
@@ -320,7 +324,8 @@ def test_player_draft_says_which_pick_of_a_double_turn_it_is(popped: Match) -> N
     draft_service.pick_player(match.pk, captain, match.step_index, target.player_id)
     state = boards.board_state(match.pk)
     payload = str(render_board(state).to_components())
-    assert f"**{state.acting_captain_name}** is picking (1 of 2)." in payload
+    assert "pick a player! ⌛ <t:" in payload
+    assert "Pick 1 of 2." in payload
 
 
 def test_oversized_roster_falls_back_to_dropdowns() -> None:
@@ -651,6 +656,7 @@ class FakeGateway:
         return set(self.voice.get(channel_id, set()))
 
     async def move_member(self, guild_id, user_id, channel_id) -> bool:
+        self._maybe_fail(f"move_member:{user_id}")
         current = [c for c, users in self.voice.items() if user_id in users]
         if not current:
             return False  # Discord's 40032.
@@ -838,6 +844,33 @@ def test_joining_waiting_room_after_pop_targets_the_lobby(wired: Community) -> N
     assert effects.voice_target(user_id, lobby_voice) is None
     assert effects.voice_target(user_id, 12345) is None  # Their own business.
     assert effects.voice_target(make_player(50).discord_user_id, WAITING_ROOM) is None
+
+
+@pytest.mark.django_db(transaction=True)
+def test_the_waiting_room_only_pulls_a_player_in_once(wired: Community) -> None:
+    players = [make_player(n) for n in range(1, 13)]
+    gateway = FakeGateway()
+    for player in players:
+        queue.join(wired.pk, player)
+    drain(gateway)
+    match = Match.objects.get()
+    lobby_voice = resource(match, ResourceKind.LOBBY_VOICE)
+    first, second = players[0].discord_user_id, players[1].discord_user_id
+    # The first time, the Waiting Room sends them on to the lobby.
+    assert effects.voice_target(first, WAITING_ROOM) == (999, lobby_voice)
+    assert effects.voice_target(first, lobby_voice) is None  # The move lands: they've arrived.
+    # Coming back later, they stay where they chose to be.
+    assert effects.voice_target(first, WAITING_ROOM) is None
+    # Joining the lobby through the invite counts as arriving too.
+    assert effects.voice_target(second, lobby_voice) is None
+    assert effects.voice_target(second, WAITING_ROOM) is None
+    # Once teams have their channels, the lobby voice still forwards people to their team.
+    match = to_champion_draft(match)
+    drain(gateway)
+    team = captain_of(match, "A").player
+    team_voice = resource(match, ResourceKind.TEAM_A_VOICE)
+    assert effects.voice_target(team.discord_user_id, team_voice) is None
+    assert effects.voice_target(team.discord_user_id, WAITING_ROOM) is None
 
 
 @pytest.mark.django_db(transaction=True)
@@ -1645,8 +1678,8 @@ def test_vote_board_has_a_two_choice_select(voting: Match, players: list[Player]
 def test_side_board_has_both_claim_buttons(voting: Match) -> None:
     match = run_player_draft(vote_captains(voting))
     labels = [button.get("label") for button in all_buttons(_check(match))]
-    assert "Become Hidden King captain" in labels
-    assert "Become Archmother captain" in labels
+    assert "Become The Hidden King Captain" in labels
+    assert "Become The Archmother Captain" in labels
 
 
 @pytest.mark.django_db
@@ -1659,7 +1692,7 @@ def test_champion_board_has_one_random_button(voting: Match) -> None:
 def test_random_choice_is_marked_on_the_board(voting: Match) -> None:
     match = to_champion_draft(voting)
     draft_service.choose_random_champion(match.pk, acting_captain(match), match.step_index)
-    assert "🎲" in str(_check(fresh(match)))
+    assert "(random choice)" in str(_check(fresh(match)))
 
 
 @pytest.mark.django_db

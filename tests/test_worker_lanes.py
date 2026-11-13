@@ -25,21 +25,25 @@ async def settle(condition: Callable[[], bool], timeout: float = 2.0) -> None:
         await asyncio.sleep(0.01)
 
 
-def fake_effect(pk: int, match_id: int | None, kind: str) -> Any:
-    return SimpleNamespace(pk=pk, match_id=match_id, kind=kind, community=None, match=None)
+def fake_effect(
+    pk: int, match_id: int | None, kind: str, payload: dict[str, Any] | None = None
+) -> Any:
+    return SimpleNamespace(
+        pk=pk, match_id=match_id, kind=kind, payload=payload or {}, community=None, match=None
+    )
 
 
 class Outbox:
-    """Stands in for the database: hands out pending effects in order, per match."""
+    """Stands in for the database: hands out pending effects in order, per lane."""
 
     def __init__(self, *effects: Any) -> None:
         self.pending = list(effects)
         self.done: list[int] = []
 
     def due_by_match(self) -> list[list[Any]]:
-        groups: dict[int | None, list[Any]] = {}
+        groups: dict[Any, list[Any]] = {}
         for effect in self.pending:
-            groups.setdefault(effect.match_id, []).append(effect)
+            groups.setdefault(worker_module.effects.effect_lane(effect), []).append(effect)
         return list(groups.values())
 
     def mark_done(self, effect_id: int, *_: object) -> None:
@@ -91,6 +95,30 @@ def test_a_slow_match_does_not_hold_up_another_match(
         slow_and_fast.release.set()
         await worker.run_once()
         assert worker.busy_matches == set()
+
+    asyncio.run(scenario())
+    assert outbox.done == [2, 1]
+
+
+def test_a_stuck_draft_does_not_hold_up_another_draft(
+    outbox: Outbox, slow_and_fast: SimpleNamespace
+) -> None:
+    """Standalone drafts belong to no match, but each still gets a lane of its own."""
+    outbox.pending = [
+        fake_effect(1, None, "slow", {"draft_id": 7}),
+        fake_effect(2, None, "fast", {"draft_id": 8}),
+    ]
+
+    async def scenario() -> None:
+        slow_and_fast.release = asyncio.Event()
+        slow_and_fast.fast_ran = asyncio.Event()
+        worker = EffectWorker(gateway=None)  # type: ignore[arg-type]
+        assert await worker.dispatch() == 2
+        await asyncio.wait_for(slow_and_fast.fast_ran.wait(), timeout=2)
+        await settle(lambda: 2 in outbox.done)
+        assert worker.busy_matches == {"quick_draft:7"}
+        slow_and_fast.release.set()
+        await worker.run_once()
 
     asyncio.run(scenario())
     assert outbox.done == [2, 1]

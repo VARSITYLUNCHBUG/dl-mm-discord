@@ -7,6 +7,8 @@ from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
 from typing import Any
 
+import discord
+
 from bot.db import db
 from bot.effects.gateway import ChannelGone, Gateway
 from bot.renderers.board import (
@@ -16,13 +18,15 @@ from bot.renderers.board import (
     render_sub_offer_dm,
     render_voice_dm,
 )
+from bot.renderers.prio import render_prio
 from bot.renderers.queue import render_queue
+from bot.renderers.quickdraft import hero_grid, render_quick_draft
 from bot.renderers.results import render_correction, render_results
 from league.domain.engine import Status
 from league.domain.errors import DomainError
 from league.models import Community, Match, OutboxEffect, Player
 from league.models.matches import ResourceKind
-from league.services import boards, dev, effects, lobby, subs
+from league.services import boards, dev, effects, lobby, prio, quickdraft, subs
 from league.services.common import add_effect
 from league.services.common import render_board as request_board
 
@@ -605,8 +609,12 @@ async def post_correction(env: Env) -> None:
 
 @effect("cleanup_voice")
 async def cleanup_voice(env: Env) -> None:
+    """The match is over: everyone in it goes back to the Waiting Room, wherever they are in
+    voice, and then its voice channels go."""
     resources = await db(effects.resources, env.match_id)
     waiting = env.community.waiting_room_channel_id
+    if waiting:
+        await _send_players_back(env, waiting)
     for kind in (ResourceKind.LOBBY_VOICE, ResourceKind.TEAM_A_VOICE, ResourceKind.TEAM_B_VOICE):
         channel_id = resources.get(kind)
         if channel_id is None:
@@ -616,6 +624,27 @@ async def cleanup_voice(env: Env) -> None:
                 await env.gateway.move_member(env.guild_id, user_id, waiting)
         await env.gateway.delete_channel(channel_id)
         await db(effects.mark_resource_deleted, env.match_id, kind)
+    if waiting:
+        # Anyone who was already in the Waiting Room gets no voice event to put them back on
+        # the priority list, so catch the list up now.
+        here = env.gateway.voice_member_ids(env.guild_id, waiting)
+        await db(prio.reconcile, env.community.pk, dict.fromkeys(here, ""))
+
+
+async def _send_players_back(env: Env, waiting: int) -> None:
+    already = env.gateway.voice_member_ids(env.guild_id, waiting)
+    for user_id in await db(effects.players_to_send_back, env.match_id):
+        if user_id in already or dev.is_fake(user_id):
+            continue
+        try:
+            # False just means they aren't in voice.
+            await env.gateway.move_member(env.guild_id, user_id, waiting)
+        except discord.HTTPException as exc:
+            # One member we can't move mustn't stop the channels being cleaned up.
+            logger.warning(
+                "Couldn't move player back to the Waiting Room",
+                extra={"match": env.match_id, "user": user_id, "status": exc.status},
+            )
 
 
 @effect("delete_text_channel")
@@ -625,3 +654,87 @@ async def delete_text_channel(env: Env) -> None:
         raise Skip("Already deleted.")
     await env.gateway.delete_channel(channel_id)
     await db(effects.mark_resource_deleted, env.match_id, ResourceKind.TEXT)
+
+
+# --- Standalone drafts (/startdraft) ----------------------------------------------------------
+
+
+@effect("render_quick_draft")
+async def render_quick_draft_effect(env: Env) -> None:
+    """The match board's approach: the draft message, with the hero grid in messages of its own
+    directly below. The draft message is edited in place while it's still at the bottom, and
+    posted again below any chat otherwise. The grid is posted afresh each turn."""
+    draft_id = int(env.effect.payload["draft_id"])
+    state = await db(quickdraft.state, draft_id)
+    if state.message_id is None or state.status == "stopped":
+        raise Skip("The draft has no message to edit.")
+    channel_id = state.channel_id
+    view = render_quick_draft(state)
+    bottom = state.grid_message_ids[-1] if state.grid_message_ids else state.message_id
+    try:
+        try:
+            at_bottom = await env.gateway.latest_message_id(channel_id) == bottom
+        except discord.Forbidden:
+            at_bottom = True  # Can't read the channel's history: just keep editing in place.
+        if at_bottom:
+            await env.gateway.edit_view(channel_id, state.message_id, view)
+        else:
+            message_id = await env.gateway.send_view(channel_id, view)
+            await db(quickdraft.moved_message, draft_id, message_id)
+            await env.gateway.delete_message(channel_id, state.message_id)
+    except ChannelGone:
+        # Deleting the draft message (or the channel) stops the draft, as it did in Bebot.
+        await db(quickdraft.message_gone, draft_id)
+        raise
+    await _repost_hero_grid(env, state, hero_grid(state))
+
+
+async def _repost_hero_grid(env: Env, state: Any, grid: list[Any]) -> None:
+    """Post the new grid, then remove the old one. Each step is recorded as it happens, so a
+    retry never leaves a grid message behind."""
+    ids: list[int | None] = list(state.grid_message_ids)
+    for index in range(max(len(grid), len(ids))):
+        old_id = ids[index] if index < len(ids) else None
+        new_id = (
+            await env.gateway.send_view(state.channel_id, grid[index])
+            if index < len(grid)
+            else None
+        )
+        if index < len(ids):
+            ids[index] = new_id
+        else:
+            ids.append(new_id)
+        await db(quickdraft.record_grid, state.id, [i for i in ids if i is not None])
+        if old_id is not None:
+            await env.gateway.delete_message(state.channel_id, old_id)
+
+
+@effect("delete_quick_draft")
+async def delete_quick_draft(env: Env) -> None:
+    payload = env.effect.payload
+    message_ids = payload.get("message_ids") or [payload["message_id"]]
+    for message_id in message_ids:
+        await env.gateway.delete_message(int(payload["channel_id"]), int(message_id))
+
+
+# --- Voice priority list (/priolist) ---------------------------------------------------------
+
+
+@effect("render_prio")
+async def render_prio_effect(env: Env) -> None:
+    community = await db(_reload_community, env.community.pk)
+    if not community.prio_channel_id:
+        raise Skip("No priority list display is set up.")
+    view = render_prio(await db(prio.prio_view, community.pk))
+    if community.prio_message_id:
+        try:
+            await env.gateway.edit_view(community.prio_channel_id, community.prio_message_id, view)
+            return
+        except ChannelGone:
+            logger.warning("Priority list message is gone; posting a new one")
+    message_id = await env.gateway.send_view(community.prio_channel_id, view)
+    await db(prio.save_display, community.pk, community.prio_channel_id, message_id)
+
+
+def _reload_community(community_id: int) -> Community:
+    return Community.objects.get(pk=community_id)

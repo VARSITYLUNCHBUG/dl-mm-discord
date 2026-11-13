@@ -534,10 +534,10 @@ def test_random_button_refuses_the_wrong_captain_and_a_stale_step(popped: Match)
         draft.choose_random_champion(match.pk, acting_captain(fresh(match)), match.step_index)
 
 
-def test_bebot_emojis_load_onto_champions(league: Community) -> None:
+def test_app_emojis_load_onto_champions(league: Community) -> None:
     result = champions.load_emojis(PRESETS / "champion_emojis.yaml")
     assert not result.unknown
-    assert Champion.objects.get(name="Abrams").discord_emoji_id == 1302512783283191879
+    assert Champion.objects.get(name="Abrams").discord_emoji_id == 1570718983353532597
     again = champions.load_emojis(PRESETS / "champion_emojis.yaml")
     assert not again.updated
 
