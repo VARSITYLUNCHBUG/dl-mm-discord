@@ -32,7 +32,7 @@ from league.models import (
 )
 from league.models.matches import RemovedReason, Source
 from league.models.moderation import PenaltyKind
-from league.services import penalties
+from league.services import penalties, prio
 from league.services.common import (
     active_participants,
     add_effect,
@@ -96,6 +96,7 @@ def create_match(community: Community, entries: Sequence[QueueEntry]) -> Match |
         for entry in entries
     )
     QueueEntry.objects.filter(pk__in=[entry.pk for entry in entries]).delete()
+    prio.drop_players(community.pk, [entry.player.discord_user_id for entry in entries])
 
     add_effect(community, "create_lobby", match=match, dedupe_key=f"create_lobby:{match.pk}")
     for entry in entries:
@@ -413,6 +414,7 @@ def swap_player(match: Match, leaving: MatchParticipant, in_player: Player, *, r
     moment = now()
     community = lock_community(match.community_id)
     QueueEntry.objects.filter(community=community, player=in_player).delete()
+    prio.drop_players(community.pk, [in_player.discord_user_id])
     MatchParticipant.objects.create(
         match=match,
         player=in_player,

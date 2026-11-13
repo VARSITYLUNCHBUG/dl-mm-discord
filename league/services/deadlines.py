@@ -10,7 +10,7 @@ from django.db import transaction
 from league.domain.engine import LIVE, Status
 from league.domain.errors import DomainError
 from league.models import Community, Match
-from league.services import draft, lobby, queue, results, subs
+from league.services import draft, lobby, prio, queue, quickdraft, results, subs
 from league.services.common import lock_match, now
 
 logger = logging.getLogger(__name__)
@@ -55,6 +55,11 @@ def tick() -> int:
             logger.exception("Match deadline failed", extra={"match": match_id})
 
     fired += subs.tick(moment)
+    fired += quickdraft.tick(moment)
+    try:
+        prio.tick(moment)
+    except Exception:
+        logger.exception("Priority list tick failed")
 
     for community_id in Community.objects.values_list("pk", flat=True):
         try:
@@ -72,4 +77,5 @@ def extend_past_due(grace_seconds: int = STARTUP_GRACE_SECONDS) -> int:
         deadline_at=new_deadline
     )
     count += subs.extend_past_due(new_deadline)
+    count += quickdraft.extend_past_due(new_deadline)
     return count

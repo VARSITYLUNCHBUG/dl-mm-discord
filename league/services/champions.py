@@ -43,15 +43,39 @@ class EmojiLoad:
     unknown: list[str] = field(default_factory=list)
 
 
-@transaction.atomic
-def load_emojis(path: Path) -> EmojiLoad:
-    """Set champions' custom emojis from a `{name: emoji_id}` file, by name or alias."""
-    data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+def _by_name() -> dict[str, Champion]:
     by_name: dict[str, Champion] = {}
     for champion in Champion.objects.all():
         by_name[champion.name.lower()] = champion
         for alias in champion.aliases:
             by_name.setdefault(alias.lower(), champion)
+    return by_name
+
+
+@transaction.atomic
+def load_unicode_emojis(path: Path) -> EmojiLoad:
+    """Set the Unicode fallback emojis from the file's `unicode` section. Safe to run again."""
+    data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    by_name = _by_name()
+    result = EmojiLoad()
+    for name, emoji in (data.get("unicode") or {}).items():
+        match = by_name.get(str(name).lower())
+        if match is None:
+            result.unknown.append(str(name))
+        elif match.unicode_emoji == str(emoji):
+            result.unchanged.append(match.name)
+        else:
+            match.unicode_emoji = str(emoji)
+            match.save(update_fields=["unicode_emoji", "updated_at"])
+            result.updated.append(match.name)
+    return result
+
+
+@transaction.atomic
+def load_emojis(path: Path) -> EmojiLoad:
+    """Set champions' custom emojis from a `{name: emoji_id}` file, by name or alias."""
+    data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    by_name = _by_name()
     result = EmojiLoad()
     for name, emoji_id in (data.get("emojis") or {}).items():
         match = by_name.get(str(name).lower())

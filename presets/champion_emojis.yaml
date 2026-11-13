@@ -1,36 +1,56 @@
-# Custom hero emojis from Bebot's production set (bot/config/ui.py, prod_hero_emojis2).
-# Load with `manage.py load_champion_emojis`. The bot must be in the server that owns them.
-# Heroes Bebot showed with a plain Unicode emoji are left out: the field holds a custom emoji ID.
+# This bot's own hero emojis, uploaded to its Discord application from the Minimap icons
+# (Developer Portal > your app > Emojis). Application emojis work in every server the bot is in.
+# Load with `manage.py load_champion_emojis`. Heroes without one use the `unicode` section below,
+# which `load_presets` loads on every start.
 emojis:
-  Abrams: 1302512783283191879
-  Bebop: 1302512796671545414
-  Calico: 1466764700619505675
-  Drifter: 1466764703136219178
-  Dynamo: 1302512805118742578
-  Grey Talon: 1302512813578653716
-  Haze: 1302512825067114508
-  Holliday: 1466764706910834882
-  Infernus: 1302512861486252103
-  Ivy: 1302512880087994368
-  Kelvin: 1302512896416157797
-  Lady Geist: 1302512908768378880
-  Lash: 1302512925440737320
-  McGinnis: 1302512941781749840
-  Mina: 1466764709452583043
-  Mirage: 1302512971309649990
-  "Mo & Krill": 1302512991564075018
-  Paige: 1466764711285624883
-  Paradox: 1302513004352503888
-  Pocket: 1302513023474208798
-  Rem: 1466778099122442342
-  Seven: 1302513043971772446
-  Shiv: 1302513060115775568
-  Sinclair: 1466764713445560473
-  The Doorman: 1466764715089723513
-  Victor: 1466764717505642496
-  Vindicta: 1302513075802341376
-  Viscous: 1302513093200449576
-  Vyper: 1466764719590211716
-  Warden: 1302513115283460137
-  Wraith: 1302513159504134224
-  Yamato: 1302513147952889887
+  Abrams: 1570718983353532597
+  Apollo: 1570718984964149320
+  Bebop: 1570718987157774416
+  Billy: 1570718989166977095
+  Calico: 1570718991004073985
+  Celeste: 1570719004673179658
+  Drifter: 1570719006447509504
+  Dynamo: 1570719007898865802
+  Graves: 1570719010037960768
+  Grey Talon: 1570719012269199470
+  Haze: 1570719014131601549
+  Holliday: 1570719016127959040
+  Infernus: 1570719017985904640
+  Ivy: 1570719019609227295
+  Kelvin: 1570719021421043816
+  Lady Geist: 1570719023694487652
+  Lash: 1570719025753759764
+  McGinnis: 1570719027657965608
+  Mina: 1570719029503467530
+  Mirage: 1570719031437041705
+  "Mo & Krill": 1570719033207038002
+  Paige: 1570719039142109314
+  Paradox: 1570719041050378259
+  Pocket: 1570719043013582938
+  Rem: 1570719044951212032
+  Seven: 1570719046767353879
+  Shiv: 1570719048503660646
+  Silver: 1570719050743681024
+  Sinclair: 1570719052597436517
+  The Doorman: 1570719054476607589
+  Venator: 1570719056397344881
+  Victor: 1570719058058547220
+  Vindicta: 1570719059979534476
+  Viscous: 1570719061829222520
+  Vyper: 1570719063653744650
+  Warden: 1570719065327149117
+  Wraith: 1570719067256651906
+  Yamato: 1570719069412261898
+unicode:
+  Apollo: "🗡️"
+  Baba: "🕊️"
+  Billy: "🐐"
+  Celeste: "🦄"
+  Deadman Danny: "💣"
+  Graves: "🪦"
+  Nurse Harrow: "💉"
+  Rat King: "🐀"
+  Silver: "🐺"
+  Solomon: "♟️"
+  Venator: "✝️"
+  Violet: "🎨"

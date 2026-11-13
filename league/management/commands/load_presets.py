@@ -18,6 +18,8 @@ class Command(BaseCommand):
         presets = settings.BASE_DIR / "presets"
         added = champions.seed_from_file(presets / "champions.yaml")
         self.stdout.write(f"Champions added: {added}")
+        emojis = champions.load_unicode_emojis(presets / "champion_emojis.yaml")
+        self.stdout.write(f"Unicode hero emojis set: {len(emojis.updated)}")
         for path in sorted(presets.glob("*.yaml")):
             if path.name in NOT_MODES:
                 continue

@@ -13,6 +13,7 @@ from league.domain.mode_schema import ModeValidationError
 from league.models import (
     CaptainVote,
     Champion,
+    ChannelPing,
     Community,
     DraftAction,
     DraftModeVersion,
@@ -25,7 +26,9 @@ from league.models import (
     Penalty,
     Player,
     PlayerRating,
+    PrioEntry,
     QueueEntry,
+    QuickDraft,
     RatingEvent,
     RatingRun,
     ResultSubmission,
@@ -58,7 +61,7 @@ class ReadOnlyInline(admin.TabularInline):
 
 @admin.register(Champion)
 class ChampionAdmin(admin.ModelAdmin):
-    list_display = ("name", "id", "is_enabled", "updated_at")
+    list_display = ("name", "id", "unicode_emoji", "is_enabled", "updated_at")
     list_editable = ("is_enabled",)
     list_filter = ("is_enabled",)
     search_fields = ("name", "aliases")
@@ -234,3 +237,19 @@ class MatchResourceAdmin(ReadOnlyAdmin):
 class OutboxEffectAdmin(ReadOnlyAdmin):
     list_display = ("id", "kind", "match", "status", "attempts", "run_after", "last_error")
     list_filter = ("status", "kind")
+
+
+@admin.register(QuickDraft)
+class QuickDraftAdmin(ReadOnlyAdmin):
+    list_display = ("id", "status", "channel_id", "hk_captain_name", "am_captain_name")
+    list_filter = ("status",)
+
+
+@admin.register(ChannelPing)
+class ChannelPingAdmin(admin.ModelAdmin):
+    list_display = ("name", "channel_id", "mention", "timer_minutes", "last_ping_at")
+
+
+@admin.register(PrioEntry)
+class PrioEntryAdmin(ReadOnlyAdmin):
+    list_display = ("display_name", "queued_at", "grace_until")

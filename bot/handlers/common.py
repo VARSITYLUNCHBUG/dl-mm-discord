@@ -30,16 +30,25 @@ def _community_of_match(match_id: int) -> Community:
     return Match.objects.select_related("community").get(pk=match_id).community
 
 
+def _holds_staff(user: discord.abc.User, community: Community) -> bool:
+    if not isinstance(user, discord.Member):
+        return False
+    if user.guild_permissions.administrator:
+        return True
+    return bool(community.staff_role_id) and any(
+        role.id == community.staff_role_id for role in user.roles
+    )
+
+
+async def is_staff(interaction: Interaction[Any], community: Community) -> bool:
+    return _holds_staff(interaction.user, community)
+
+
 async def require_staff(interaction: Interaction[Any], community: Community | None = None) -> None:
     """Administrators, or anyone holding the configured staff role."""
     community = community or await community_of(interaction)
-    user = interaction.user
-    if isinstance(user, discord.Member):
-        if user.guild_permissions.administrator:
-            return
-        if community.staff_role_id and any(r.id == community.staff_role_id for r in user.roles):
-            return
-    raise NotAllowed("Only staff can do that.")
+    if not _holds_staff(interaction.user, community):
+        raise NotAllowed("Only staff can do that.")
 
 
 async def require_staff_for_match(interaction: Interaction[Any], match_id: int) -> None:

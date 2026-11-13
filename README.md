@@ -75,7 +75,15 @@ judgements, not published standards.
 
 Switch with `/mode activate slug:<slug>`. Bebot's custom hero emojis are in
 `presets/champion_emojis.yaml`. Load them with `manage.py load_champion_emojis`. The bot must be in
-the server that owns them.
+the server that owns them. The heroes Bebot showed with a plain emoji (Apollo 🗡️, Billy 🐐 and so
+on) are in the same file's `unicode` section, and `load_presets` loads those on every start.
+
+The draft looks the way it did in Bebot: a `🏆 Draft #12: Crimson Wolf 🏆` title, the 👑 Captains
+block with the captain on the clock mentioned as "ban a hero! ⌛ in 38 seconds", 🚫 Bans, each
+side's heroes with their emojis, and the bracketed Bans/Picks turn strip. The colour follows the
+side on the clock, orange for 🔶 The Hidden King and blue for 🔷 The Archmother. Hero buttons are
+Bebot's grey ones. A captain's Random shows "(random choice)" and a timeout shows "(randomed)". The
+countdown is a Discord timestamp, so it ticks without the bot editing the message every second.
 
 ### Subs
 
@@ -96,6 +104,51 @@ lobby-host role and result. The timer resumes where it stopped, with at least 15
 player goes back into the queue. Subbing out once the game is on gives a leaver cooldown;
 cancelling the request doesn't. At most 4 requests can be pending at once. All of these timers
 live in the draft mode's `subs` section.
+
+## Bebot's other tools
+
+These came over from Bebot as they were and run alongside the match flow. None of them changes
+ratings.
+
+**Standalone draft.** `/startdraft` posts Bebot's two buttons, Become The Hidden King Captain and
+Become The Archmother Captain, in any channel. Once both are taken, the hero draft runs in
+the match flow's style: the draft message, with every hero below it in messages of their own, taken
+ones greyed out in place, and 🎲 Random last. The active mode's ban and pick order runs, 40 s a turn,
+and only the captain on the clock can choose. Chat below moves the draft back to the bottom. It ends
+with `# GLHF` and a GIF. `/stopdraft` stops it and deletes its messages; the captains, whoever
+started it, and staff can do that. Each channel runs one draft at a time. In `DEBUG`, one person can
+captain both sides, as in Bebot.
+
+**Captain coinflip.** `/captains_coinflip captain1 captain2` flips a coin. The winner chooses First
+Pick, Last Pick, 🔶 Hidden King or 🔷 Archmother, the loser chooses from the other kind, and either
+captain presses Start Draft. Unlike `/startdraft`, The Archmother can end up picking first.
+`/coinflip player1 player2` only says who should take The Hidden King. `/randomdraft` posts a
+random ban and pick for both sides.
+
+**Priority list.** Bebot's voice queue, for running inhouses by hand. It follows the match queue's
+Waiting Room (set with `/setup`) and the match lifecycle, rather than every voice move:
+
+| What happens | The list |
+|---|---|
+| You join the Waiting Room | You go on (🟢), longest wait first |
+| You leave it | 5 minutes of grace (⏳). Come back in time and you keep your place |
+| You're put in a match (or sub in) | You come off. Until it ends, voice moves don't matter, and the queue won't take you |
+| The match ends | Everyone in it is moved back to the Waiting Room, wherever they are in voice, and goes on the back of the list |
+
+Bebot's team rooms, `/spectate` and "recently played" timer aren't needed: the match itself says
+who is playing, and going on the back of the list after a match does what the timer did. Run
+`/priolist` in the channel that should show the list. It updates on every Waiting Room change and
+once a minute. `/prio` shows it in any channel, `/refresh` re-renders it and `/removeprio` takes
+someone off. Bebot posted the list through a webhook named Bebot; here the bot posts it itself, so
+it needs no Manage Webhooks permission.
+
+**Pings.** `/pingchannel channel name mention timer [required_role]` sets up a named ping, such as
+`pugs` for `@PUGS` every 15 minutes. Members send it with `/ping message [name]`, and `/pings` lists
+them with their cooldowns. Only the configured mention can ping: roles or people typed into the
+message don't. `/removeping` deletes one.
+
+**Error channel.** `/seterrorchannel channel` posts the bot's ERROR logs there too, with the
+traceback, at most 10 a minute. `/clearerrorchannel` stops it.
 
 ## The match channel
 
@@ -161,11 +214,14 @@ differences and never rewrites history. `/match explain` shows the trail.
 ## Commands
 
 **Players:** `/leaderboard`, `/stats`, `/rating history`, `/queue status`, `/submit` (fallback for
-when the report form's upload fails).
+when the report form's upload fails), `/startdraft`, `/stopdraft`, `/captains_coinflip`,
+`/coinflip`, `/randomdraft`, `/prio`, `/refresh`, `/ping`, `/pings`.
 
 **Staff:** `/setup`, `/match status|void|rescore|sub|explain`, `/rating seed|adjust`,
-`/queue kick|clear`, `/penalty add|revoke`, `/mode list|activate`, `/roster sync`, `/ledger_check`.
-Anything that rewrites past ratings shows a preview and needs Confirm.
+`/queue kick|clear`, `/penalty add|revoke`, `/mode list|activate`, `/roster sync`, `/ledger_check`,
+`/priolist`, `/removeprio`, `/pingchannel`, `/removeping`, `/seterrorchannel`,
+`/clearerrorchannel`. Anything that rewrites past ratings shows a preview and needs Confirm. Bebot's
+staff commands default to administrators in Discord's integration settings; staff can use them too.
 
 ## Tables
 
@@ -177,6 +233,7 @@ Anything that rewrites past ratings shows a preview and needs Confirm.
 | Matches | `matches`, `match_participants`, `match_resources`, `match_transitions`, `draft_actions`, `captain_votes`, `sub_requests`, `sub_offers` |
 | Results | `result_submissions`, `match_results` |
 | Operations | `penalties`, `outbox_effects` |
+| Bebot's tools | `quick_drafts`, `quick_draft_actions`, `prio_entries`, `channel_pings` |
 
 For analytics, start at `result_submissions`. Screenshots are in the archive channel: use
 `archive_message_id` and `attachment_id` with the Discord API, because CDN URLs expire. Join
@@ -205,7 +262,8 @@ The rules that keep it reliable:
 - **Timers are rows.** A poller applies timeouts through the same path as a click. After downtime,
   past-due deadlines get 60 s of grace.
 - **Discord calls happen after commit.** State changes write `outbox_effects` in the same transaction,
-  and a worker runs them in order per match, retrying on server errors.
+  and a worker runs them in order per match, retrying on server errors. Each match, and each
+  standalone draft, has its own lane, so one that keeps failing never holds up the others.
 
 ## Operations
 

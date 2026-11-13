@@ -24,32 +24,56 @@ BOARD_MOVE_MAX_WAIT_SECONDS = 20
 BOARD_MOVE_IDLE_SECONDS = 3600
 
 
-def due_by_match(limit: int = 200) -> list[list[OutboxEffect]]:
-    """Due effects grouped so each match runs its effects in order.
+Lane = int | str
 
-    If an earlier effect of a match is waiting on a retry, later ones of that match wait too,
+
+def lane_of(match_id: int | None, kind: str, payload: object) -> Lane:
+    """Which effects must run in order with this one.
+
+    A match's effects share its lane. Effects outside a match get their own: one per standalone
+    draft, and one per kind for the rest (the queue panel, the priority list), so a draft whose
+    message keeps failing never holds up another draft or the queue.
+    """
+    if match_id is not None:
+        return match_id
+    if isinstance(payload, dict) and "draft_id" in payload:
+        return f"quick_draft:{payload['draft_id']}"
+    return kind
+
+
+def effect_lane(effect: OutboxEffect) -> Lane:
+    return lane_of(effect.match_id, effect.kind, effect.payload)
+
+
+def due_by_match(limit: int = 200) -> list[list[OutboxEffect]]:
+    """Due effects grouped by lane (see `lane_of`), so each lane runs its effects in order.
+
+    If an earlier effect of a lane is waiting on a retry, later ones of that lane wait too,
     unless they were created with a future `run_after`, such as the reminder and final cleanup,
     which are independent of the immediate work.
     """
     moment = now()
-    retrying: dict[object, int] = {}
+    retrying: dict[Lane, int] = {}
     waiting = OutboxEffect.objects.filter(status=EffectStatus.PENDING, attempts__gt=0).order_by(
         "id"
     )
-    for match_id, effect_id in waiting.values_list("match_id", "id"):
-        retrying.setdefault(match_id, effect_id)
+    for match_id, kind, payload, effect_id in waiting.values_list(
+        "match_id", "kind", "payload", "id"
+    ):
+        retrying.setdefault(lane_of(match_id, kind, payload), effect_id)
 
-    groups: dict[object, list[OutboxEffect]] = defaultdict(list)
+    groups: dict[Lane, list[OutboxEffect]] = defaultdict(list)
     due = (
         OutboxEffect.objects.filter(status=EffectStatus.PENDING, run_after__lte=moment)
         .select_related("community", "match")
         .order_by("id")[:limit]
     )
     for effect in due:
-        blocker = retrying.get(effect.match_id)
+        lane = effect_lane(effect)
+        blocker = retrying.get(lane)
         if blocker is not None and effect.pk > blocker:
             continue
-        groups[effect.match_id].append(effect)
+        groups[lane].append(effect)
     return list(groups.values())
 
 
@@ -164,8 +188,10 @@ def cancel_board_moves(match_id: int) -> None:
 def voice_target(discord_user_id: int, joined_channel_id: int) -> tuple[int, int] | None:
     """Where a player joining this channel should be sent: (guild ID, channel ID), or None.
 
-    Covers someone who joins the Waiting Room after their lobby popped, or the lobby voice after
-    teams moved on. Anyone else is left alone, wherever they are.
+    Covers someone who joins the Waiting Room after their lobby popped but before they've been in
+    the match's voice, or the lobby voice after teams moved on. That happens once: after they've
+    been in the match's voice, coming back to the Waiting Room leaves them there. Anyone else is
+    left alone, wherever they are.
     """
     participant = (
         MatchParticipant.objects.filter(player__discord_user_id=discord_user_id, is_active=True)
@@ -182,11 +208,29 @@ def voice_target(discord_user_id: int, joined_channel_id: int) -> tuple[int, int
     team_channel = channels.get(team_kind) if team_kind else None
     lobby_channel = channels.get(ResourceKind.LOBBY_VOICE)
     target = team_channel or lobby_channel
+    match_voice = {channel for channel in (team_channel, lobby_channel) if channel is not None}
+    arrived = participant.voice_joined_at is not None
+    if joined_channel_id in match_voice and not arrived:
+        # Moved in by the bot or joined through the invite: either way, they've arrived.
+        MatchParticipant.objects.filter(pk=participant.pk).update(voice_joined_at=now())
+        arrived = True
     if target is None or target == joined_channel_id:
         return None
-    if joined_channel_id not in {match.community.waiting_room_channel_id, lobby_channel}:
+    if joined_channel_id == lobby_channel:
+        return match.community.discord_guild_id, target  # The lobby voice is on its way out.
+    if joined_channel_id != match.community.waiting_room_channel_id or arrived:
         return None
     return match.community.discord_guild_id, target
+
+
+def players_to_send_back(match_id: int) -> list[int]:
+    """Discord IDs of everyone still in this match when it ended, except anyone who is already
+    in another live match (a requeued player can be matched again before cleanup runs)."""
+    finished = MatchParticipant.objects.filter(match_id=match_id, removed_reason="")
+    elsewhere = MatchParticipant.objects.filter(is_active=True).exclude(match_id=match_id)
+    busy = set(elsewhere.values_list("player_id", flat=True))
+    rows = finished.exclude(player_id__in=busy).values_list("player__discord_user_id", flat=True)
+    return sorted(set(rows))
 
 
 def stale_resources() -> list[tuple[int, str, int]]:
