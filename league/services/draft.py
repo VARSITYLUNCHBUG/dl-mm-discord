@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 
 from django.db import IntegrityError, transaction
@@ -28,13 +29,15 @@ from league.services.common import (
     lock_match,
     mode_of,
     now,
-    rating_of,
     render_board,
     require_not_on_hold,
     save_transition,
     seconds_from_now,
+    strength_of,
     transition,
 )
+
+logger = logging.getLogger(__name__)
 
 LOBBY_CODE_PATTERN = re.compile(r"^[A-Za-z0-9-]{3,32}$")
 
@@ -87,8 +90,8 @@ def _record(
 def _undrafted(match: Match) -> list[DraftablePlayer]:
     players = []
     for participant in active_participants(match).filter(team=""):
-        rating, _games = rating_of(match.season, participant.player_id)
-        players.append(DraftablePlayer(participant.player_id, rating))
+        strength = strength_of(match.season, participant.player_id)
+        players.append(DraftablePlayer(participant.player_id, strength))
     return players
 
 
@@ -365,19 +368,115 @@ def begin_lobby_code(match: Match, mode: DraftMode) -> None:
         deadline_at=seconds_from_now(mode.lobby_code.seconds),
     )
     save_transition(match, "lobby_code_host", "lobby_code_attempts", "step_index")
-    _ping_host(match, host.player)
+    if match.community.auto_lobby:
+        # The host can still enter a code by hand while the bot asks deadlock-api for one.
+        add_effect(
+            match.community,
+            "create_api_lobby",
+            match=match,
+            dedupe_key=f"create_api_lobby:{match.pk}",
+        )
+    else:
+        _ping_host(match, host.player)
     render_board(match)
 
 
-def _ping_host(match: Match, host: Player) -> None:
+def _ping_host(match: Match, host: Player, prefix: str = "") -> None:
     add_effect(
         match.community,
         "ping",
         {
             "user_ids": [host.discord_user_id],
-            "text": "create the custom lobby, then press Enter lobby code on the board.",
+            "text": f"{prefix}create the custom lobby, then press Enter lobby code on the board.",
         },
         match=match,
+    )
+
+
+# API lobbies: deadlock-api's bot hosts, and leaves this long after creating the lobby.
+API_LOBBY_MINUTES = 15
+
+
+@transaction.atomic
+def accept_api_lobby(match_id: int, party_id: str, party_code: str) -> bool:
+    """deadlock-api made the lobby: post its code and start the game. False if a captain got
+    there first, or the match moved on."""
+    match = lock_match(match_id)
+    if match.status != Status.LOBBY_CODE or match.held_seconds is not None:
+        return False
+    match.api_party_id = party_id[:32]
+    match.api_lobby_created_at = now()
+    _start_game(match, party_code, source=Source.SYSTEM, actor=None)
+    return True
+
+
+@transaction.atomic
+def api_lobby_failed(match_id: int, reason: str) -> None:
+    """Lobby creation didn't work: the host makes one by hand, on the usual clock."""
+    match = lock_match(match_id)
+    if match.status != Status.LOBBY_CODE or match.lobby_code_host is None:
+        return
+    logger.warning("API lobby failed", extra={"match": match.pk, "reason": reason[:200]})
+    _ping_host(match, match.lobby_code_host, "the bot couldn't make the lobby, so please ")
+
+
+def check_can_start_api(match_id: int, player: Player) -> str:
+    """The lobby's party ID, if this captain may start the API lobby now."""
+    match = Match.objects.filter(pk=match_id).first()
+    if match is None or match.status != Status.IN_PROGRESS or not match.api_party_id:
+        raise StaleAction("There's no bot lobby to start.")
+    if match.api_started_at is not None:
+        raise StaleAction("The match has already started.")
+    if not match.participants.filter(player=player, is_captain=True, is_active=True).exists():
+        raise NotAllowed("Only a captain can start the match.")
+    return match.api_party_id
+
+
+@transaction.atomic
+def mark_api_started(match_id: int, player: Player) -> None:
+    match = lock_match(match_id)
+    if match.api_started_at is not None:
+        return
+    match.api_started_at = now()
+    bump(match, "api_started_at")
+    add_effect(
+        match.community,
+        "fetch_api_match_id",
+        {"attempt": 1},
+        match=match,
+        dedupe_key=f"fetch_api_match_id:{match.pk}:1",
+        run_after=seconds_from_now(60),
+    )
+    add_effect(
+        match.community,
+        "ping_lobby",
+        {"text": f"**{player.display_name}** started the match. GLHF!"},
+        match=match,
+    )
+    render_board(match)
+
+
+MATCH_ID_RETRY_SECONDS = (60, 120, 300, 600, 900)
+
+
+@transaction.atomic
+def record_api_match_id(match_id: int, deadlock_match_id: int | None, attempt: int) -> None:
+    """The Deadlock match ID of a started API lobby, or another try later."""
+    from league.services import api_results
+
+    match = lock_match(match_id)
+    if deadlock_match_id is not None:
+        api_results.set_deadlock_match_id(match, deadlock_match_id)
+        return
+    if attempt >= len(MATCH_ID_RETRY_SECONDS):
+        return
+    add_effect(
+        match.community,
+        "fetch_api_match_id",
+        {"attempt": attempt + 1},
+        match=match,
+        dedupe_key=f"fetch_api_match_id:{match.pk}:{attempt + 1}",
+        run_after=seconds_from_now(MATCH_ID_RETRY_SECONDS[attempt]),
     )
 
 
@@ -420,17 +519,22 @@ def submit_lobby_code(match_id: int, player: Player, code: str) -> None:
     cleaned = code.strip()
     if not LOBBY_CODE_PATTERN.match(cleaned):
         raise InvalidAction("That doesn't look like a lobby code: use letters, numbers or dashes.")
+    _start_game(match, cleaned, source=Source.USER, actor=player)
+
+
+def _start_game(match: Match, code: str, *, source: str, actor: Player | None) -> None:
+    """The lobby exists: post its code and start the result clock."""
     mode = mode_of(match)
-    match.lobby_code = cleaned
+    match.lobby_code = code
     match.started_at = now()
     transition(
         match,
         Status.IN_PROGRESS,
-        source=Source.USER,
-        actor=player,
+        source=source,
+        actor=actor,
         deadline_at=seconds_from_now(mode.results.staff_escalation_minutes * 60),
     )
-    save_transition(match, "lobby_code", "started_at")
+    save_transition(match, "lobby_code", "started_at", "api_party_id", "api_lobby_created_at")
     add_effect(match.community, "announce_lobby_code", match=match)
     add_effect(
         match.community,
