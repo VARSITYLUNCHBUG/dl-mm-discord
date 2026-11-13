@@ -17,3 +17,6 @@ staticfiles/
 .bot-heartbeat
 postmatch_screens/
 scoreocr_out/
+
+# Local database dumps.
+backups/
