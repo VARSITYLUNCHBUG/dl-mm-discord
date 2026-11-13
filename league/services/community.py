@@ -47,3 +47,24 @@ def save_wiring(community_id: int, **ids: int | None) -> None:
     if unknown:
         raise ValueError(f"Unknown wiring fields: {sorted(unknown)}")
     Community.objects.filter(pk=community_id).update(**ids)
+
+
+@transaction.atomic
+def start_season(community: Community, params: dict[str, object] | None = None) -> Season:
+    """Close the open season and open the next. Ratings start fresh, with `params` over the
+    OpenSkill defaults; they're fixed once the season rates a match."""
+    from league.domain.openskill_v1 import DEFAULT_PARAMS
+
+    unknown = set(params or {}) - set(DEFAULT_PARAMS)
+    if unknown:
+        raise InvalidAction(f"Unknown rating parameters: {', '.join(sorted(unknown))}.")
+    moment = now()
+    Season.objects.filter(community=community, ended_at__isnull=True).update(ended_at=moment)
+    number = Season.objects.filter(community=community).count() + 1
+    return Season.objects.create(
+        community=community,
+        number=number,
+        name=f"Season {number}",
+        rating_params=dict(params or {}),
+        started_at=moment,
+    )

@@ -64,6 +64,18 @@ def rating_of(season: Season, player_id: int) -> tuple[int, int]:
     return row.rating, row.games
 
 
+def strength_of(season: Season, player_id: int) -> int:
+    """What captain tie-breaks, first pick and auto-picks compare: mu, in thousandths. The shown
+    rating is deliberately conservative, so a strong player still in placement would otherwise
+    look weak."""
+    row = PlayerRating.objects.filter(season=season, player_id=player_id).first()
+    if row is not None:
+        return int(row.mu * 1000)
+    from league.domain.openskill_v1 import merged_params
+
+    return int(float(merged_params(season.rating_params)["mu"]) * 1000)
+
+
 def lock_match(match_id: int) -> Match:
     """Take the row lock every state change goes through. Call inside transaction.atomic()."""
     match = (

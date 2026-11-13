@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from decimal import Decimal
+
 import pytest
 from django.db import DatabaseError, connection, transaction
 
@@ -167,7 +169,7 @@ def test_seed_and_adjust_survive_a_correction(league: Community) -> None:
     matches = ladder(league)
     season = matches[0].season
     player = make_player(1)
-    ratings.seed_player(season, player, 1500, actor=None)
+    ratings.seed_player(season, player, "high", actor=None)
     ratings.adjust_player(season, make_player(2), -25, actor=None, reason="Conduct")
     corrections.apply_outcome_correction(matches[0].pk, "void", actor=None, reason="x")
     assert integrity.check_all() == []
@@ -179,7 +181,7 @@ def test_seed_before_play_affects_expected_score(league: Community) -> None:
     season = league.seasons.get()
     pool = [make_player(n) for n in range(1, 13)]
     for player in pool[:6]:
-        ratings.seed_player(season, player, 1500, actor=None)
+        ratings.seed_player(season, player, "high", actor=None)
     match = play_full_match(league, pool, "A", 1)
     assert integrity.check_all() == []
     assert RatingEvent.objects.filter(match=match, expected__isnull=False).exists()
@@ -195,18 +197,27 @@ def test_rebuild_repairs_a_corrupted_projection(league: Community) -> None:
     assert row.games > 0
 
 
-def test_integrity_detects_a_non_zero_sum_run(league: Community) -> None:
+def test_integrity_detects_a_stray_ledger_row(league: Community) -> None:
     match = ladder(league, 1)[0]
     run = RatingRun.objects.filter(match=match).first()
     RatingEvent.objects.create(
         run=run,
         season=match.season,
         player=make_player(99),
+        match=match,
         delta=5,
-        rating_after=1005,
+        rating_after=5,
+        mu_delta=Decimal("0.5"),
+        sigma_delta=Decimal(0),
+        mu_after=Decimal("25.5"),
+        sigma_after=Decimal("8.333333"),
+        award_adj=Decimal("0.5"),
         created_at=run.created_at,
     )
-    assert any("sums to 5" in problem for problem in integrity.check_all())
+    problems = integrity.check_all()
+    assert any("awards sum to" in problem for problem in problems)
+    assert any("Replay differs" in problem for problem in problems)
+    assert any("no rating row" in problem for problem in problems)
 
 
 # --- Append-only triggers ------------------------------------------------------------------
