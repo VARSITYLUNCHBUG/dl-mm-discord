@@ -5,6 +5,8 @@ from django.db import connection
 from django.http import HttpRequest, JsonResponse
 from django.urls import path
 
+from league.web.views import calibration_dashboard
+
 
 def healthz(_request: HttpRequest) -> JsonResponse:
     with connection.cursor() as cursor:
@@ -13,6 +15,8 @@ def healthz(_request: HttpRequest) -> JsonResponse:
 
 
 urlpatterns = [
+    # Before the admin's own URLs, so it isn't read as an app label.
+    path("admin/calibration/", calibration_dashboard, name="calibration"),
     path("admin/", admin.site.urls),
     path("healthz", healthz),
 ]

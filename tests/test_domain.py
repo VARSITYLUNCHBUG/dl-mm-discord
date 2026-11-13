@@ -6,10 +6,7 @@ from pathlib import Path
 
 import pytest
 import yaml
-from hypothesis import given
-from hypothesis import strategies as st
 
-from league.domain import elo
 from league.domain.draft_plan import build_plan, team_for_role
 from league.domain.engine import (
     CaptainCandidate,
@@ -33,64 +30,6 @@ BEBOT = yaml.safe_load((PRESETS / "bebot_2ban.yaml").read_text(encoding="utf-8")
 
 def body(**changes: object) -> dict[str, object]:
     return {**THREE_BAN, **changes}
-
-
-# --- Elo -----------------------------------------------------------------------------------
-
-
-def test_report_worked_example_a_wins() -> None:
-    team_a = [1420, 1310, 1250, 1200, 1120, 1050]
-    team_b = [1390, 1280, 1230, 1190, 1140, 1090]
-    result = elo.compute(team_a, team_b, a_won=True, k=32)
-    assert result.avg_a == 1225
-    assert result.avg_b == 1220
-    assert round(result.expected_a, 3) == 0.507
-    assert result.delta_a == 16
-
-
-def test_report_worked_example_b_wins() -> None:
-    team_a = [1420, 1310, 1250, 1200, 1120, 1050]
-    team_b = [1390, 1280, 1230, 1190, 1140, 1090]
-    assert elo.compute(team_a, team_b, a_won=False, k=32).delta_a == -16
-
-
-@pytest.mark.parametrize(
-    ("gap", "win", "loss"),
-    [(0, 16, -16), (50, 14, -18), (100, 12, -20), (200, 8, -24), (400, 3, -29)],
-)
-def test_stakes_table_from_report(gap: int, win: int, loss: int) -> None:
-    favourite = [1000 + gap] * 6
-    underdog = [1000] * 6
-    assert elo.compute(favourite, underdog, a_won=True, k=32).delta_a == win
-    assert elo.compute(favourite, underdog, a_won=False, k=32).delta_a == loss
-
-
-def test_rounding_is_half_up_not_bankers() -> None:
-    # K * (S - E) lands exactly on 8.5: Python's round() would give 8 here.
-    result = elo.compute([1000], [1000], a_won=True, k=17)
-    assert result.delta_a == 9  # 17 * 0.5 = 8.5, rounds up
-    assert round(8.5) == 8
-
-
-@given(
-    st.lists(st.integers(0, 4000), min_size=6, max_size=6),
-    st.lists(st.integers(0, 4000), min_size=6, max_size=6),
-    st.booleans(),
-    st.integers(1, 100),
-)
-def test_elo_is_exactly_zero_sum(a: list[int], b: list[int], a_won: bool, k: int) -> None:
-    delta = elo.compute(a, b, a_won, k).delta_a
-    total = sum(r + delta for r in a) + sum(r - delta for r in b)
-    assert total == sum(a) + sum(b)
-
-
-@given(
-    st.lists(st.integers(0, 4000), min_size=6, max_size=6),
-    st.lists(st.integers(0, 4000), min_size=6, max_size=6),
-)
-def test_winner_never_loses_points(a: list[int], b: list[int]) -> None:
-    assert elo.compute(a, b, True, 32).delta_a >= 0
-    assert elo.compute(a, b, False, 32).delta_a <= 0
 
 
 # --- Mode schema ---------------------------------------------------------------------------

@@ -42,6 +42,9 @@ class Outbox:
             groups.setdefault(effect.match_id, []).append(effect)
         return list(groups.values())
 
+    def mark_started(self, effect_id: int) -> bool:
+        return any(effect.pk == effect_id for effect in self.pending)
+
     def mark_done(self, effect_id: int, *_: object) -> None:
         self.pending = [effect for effect in self.pending if effect.pk != effect_id]
         self.done.append(effect_id)
@@ -51,6 +54,7 @@ class Outbox:
 def outbox(monkeypatch: pytest.MonkeyPatch) -> Outbox:
     box = Outbox()
     monkeypatch.setattr(worker_module.effects, "due_by_match", box.due_by_match)
+    monkeypatch.setattr(worker_module.effects, "mark_started", box.mark_started)
     monkeypatch.setattr(worker_module.effects, "mark_done", box.mark_done)
     return box
 

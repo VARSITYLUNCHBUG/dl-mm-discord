@@ -8,27 +8,48 @@ from typing import Any
 
 import discord
 from discord import Interaction, app_commands
+from django.conf import settings
+from django.db import transaction
+from django.db.models import Count
 
 from bot.commands.player import queue_group, rating_group
 from bot.db import db
 from bot.handlers.common import actor, community_of, require_staff
+from bot.handlers.results import send_name_picker
 from bot.routing import guarded, reply
 from league.domain.engine import TERMINAL, Status
 from league.domain.errors import InvalidAction
 from league.domain.mode_schema import ModeValidationError
-from league.models import Community, DraftModeVersion, Match, Player, RatingEvent
+from league.integrations import deadlock_api
+from league.models import (
+    ApiMatchCheck,
+    Community,
+    DraftModeVersion,
+    Match,
+    MatchAward,
+    Player,
+    RatingEvent,
+    ScoreboardRead,
+)
+from league.models.scoreboards import AwardSource
 from league.services import (
+    api_results,
+    awards,
     boards,
     champions,
     common,
     corrections,
+    early_leave,
     integrity,
     lobby,
     modes,
+    ocr,
     penalties,
     queue,
     ratings,
     results,
+    standing,
+    steam,
 )
 from league.services.corrections import Preview
 
@@ -240,6 +261,15 @@ def _explain_text(community: Community, match_id: int) -> str:
         f"[{event.run.kind}]"
         for event in events[:24]
     ]
+    names = dict(match.participants.values_list("player_id", "player__display_name"))
+    for award in MatchAward.objects.filter(match=match).order_by("revision", "id"):
+        who = names.get(award.player_id, "nobody") if award.player_id else "cleared"
+        lines.append(f"Awards rev {award.revision}: {award.kind or '-'} {who} ({award.source})")
+    for read in ScoreboardRead.objects.filter(match=match).order_by("id"):
+        lines.append(
+            f"Scoreboard read {read.pk}: {read.status}, winner {read.ocr_winner or '?'}, "
+            f"badges {'clean' if read.badges_clean else 'unclear'}"
+        )
     text = "\n".join(lines)
     if rows:
         text += "\n```\n" + "\n".join(rows) + "\n```"
@@ -255,15 +285,123 @@ async def match_explain(interaction: Interaction[Any], match_id: int) -> None:
     await guarded(interaction, run)
 
 
-@rating_group.command(name="seed", description="Staff: set a player's rating for known skill")
-async def rating_seed(interaction: Interaction[Any], player: discord.Member, rating: int) -> None:
+async def _member_player(member: discord.Member | None) -> Player | None:
+    if member is None:
+        return None
+    return await db(common.get_or_create_player, member.id, member.display_name)
+
+
+@match_group.command(name="awards", description="Set a match's MVP and key players")
+@app_commands.describe(
+    mvp="The MVP", key1="A key player", key2="Another key player", clear="Remove all awards"
+)
+async def match_awards(
+    interaction: Interaction[Any],
+    match_id: int,
+    reason: str,
+    mvp: discord.Member | None = None,
+    key1: discord.Member | None = None,
+    key2: discord.Member | None = None,
+    clear: bool = False,
+) -> None:
+    async def run() -> None:
+        community = await _staff_start(interaction)
+        match = await db(_get_match, community, match_id)
+        staff = await actor(interaction)
+        mvp_player = await _member_player(mvp)
+        keys = [p for p in [await _member_player(key1), await _member_player(key2)] if p]
+        if clear:
+            picked: dict[int, str] = {}
+        else:
+            picked = awards.from_picks(mvp_player.pk if mvp_player else None, [p.pk for p in keys])
+            if not picked:
+                raise InvalidAction("Name an MVP or key player, or set clear.")
+        preview = await db(corrections.preview_awards, match, picked)
+
+        async def apply(confirmed: Interaction[Any]) -> None:
+            await db(
+                corrections.apply_award_correction,
+                match_id,
+                picked,
+                AwardSource.STAFF,
+                staff,
+                reason,
+            )
+            await reply(confirmed, f"Awards for #{match_id} set. Staff awards beat the scoreboard.")
+
+        text = f"Set the awards for #{match_id}?\n{await db(_preview_text, preview)}"
+        await _send_confirm(interaction, text, apply)
+
+    await guarded(interaction, run)
+
+
+def _latest_read_id(community: Community, match_id: int) -> int:
+    read = ocr.latest_read(_get_match(community, match_id))
+    if read is None:
+        raise InvalidAction("That match has no scoreboard read.")
+    return read.pk
+
+
+@match_group.command(name="names", description="Match scoreboard names to players")
+async def match_names(interaction: Interaction[Any], match_id: int) -> None:
+    async def run() -> None:
+        community = await _staff_start(interaction)
+        read_id = await db(_latest_read_id, community, match_id)
+        await send_name_picker(interaction, match_id, read_id)
+
+    await guarded(interaction, run)
+
+
+@match_group.command(
+    name="early_leave", description="Void a match because someone left in its first minutes"
+)
+@app_commands.describe(leaver="Who left. They get a leaver penalty; nobody's rating changes")
+async def match_early_leave(
+    interaction: Interaction[Any], match_id: int, leaver: discord.Member
+) -> None:
+    async def run() -> None:
+        community = await _staff_start(interaction)
+        match = await db(_get_match, community, match_id)
+        staff = await actor(interaction)
+        target = await db(common.get_or_create_player, leaver.id, leaver.display_name)
+
+        async def apply(confirmed: Interaction[Any]) -> None:
+            await db(early_leave.staff_void, match.pk, target, staff)
+            await reply(confirmed, f"Match #{match_id} voided: {leaver.display_name} left early.")
+
+        await _send_confirm(
+            interaction,
+            f"Void match #{match_id} because {leaver.display_name} left early? Nobody's rating "
+            "changes, they get a leaver penalty and everyone else goes back in the queue.",
+            apply,
+        )
+
+    await guarded(interaction, run)
+
+
+@rating_group.command(name="seed", description="Staff: set a player's starting skill band")
+@app_commands.describe(band="new is skill 15, mid 25 and high 35, with full uncertainty")
+@app_commands.choices(
+    band=[
+        app_commands.Choice(name="New", value="new"),
+        app_commands.Choice(name="Mid", value="mid"),
+        app_commands.Choice(name="High", value="high"),
+    ]
+)
+async def rating_seed(
+    interaction: Interaction[Any], player: discord.Member, band: app_commands.Choice[str]
+) -> None:
     async def run() -> None:
         community = await _staff_start(interaction)
         staff = await actor(interaction)
         target = await db(common.get_or_create_player, player.id, player.display_name)
         season = await db(common.open_season, community)
-        await db(ratings.seed_player, season, target, rating, staff)
-        await reply(interaction, f"{player.display_name} is now {rating}.")
+        event = await db(ratings.seed_player, season, target, band.value, staff)
+        await reply(
+            interaction,
+            f"{player.display_name} is seeded {band.value}. Their shown rating is "
+            f"{event.rating_after} until games confirm it.",
+        )
 
     await guarded(interaction, run)
 
@@ -346,12 +484,121 @@ async def penalty_add(
 
 
 @penalty_group.command(name="revoke", description="Lift a player's active cooldown")
-async def penalty_revoke(interaction: Interaction[Any], player: discord.Member) -> None:
+@app_commands.describe(keep_strikes="Keep the strikes it added. By default they go too")
+async def penalty_revoke(
+    interaction: Interaction[Any], player: discord.Member, keep_strikes: bool = False
+) -> None:
     async def run() -> None:
         community = await _staff_start(interaction)
         target = await db(common.get_or_create_player, player.id, player.display_name)
-        count = await db(penalties.revoke_active, community, target)
-        await reply(interaction, f"Lifted {count} cooldown(s).")
+        count = await db(penalties.revoke_active, community, target, keep_strikes=keep_strikes)
+        strikes = "kept" if keep_strikes else "removed"
+        await reply(interaction, f"Lifted {count} cooldown(s); their strikes are {strikes}.")
+
+    await guarded(interaction, run)
+
+
+@penalty_group.command(name="strikes", description="Add or remove dodge strikes by hand")
+@app_commands.describe(delta="Positive adds strikes, negative removes them")
+async def penalty_strikes(
+    interaction: Interaction[Any],
+    player: discord.Member,
+    delta: app_commands.Range[int, -20, 20],
+    reason: str,
+) -> None:
+    async def run() -> None:
+        community = await _staff_start(interaction)
+        staff = await actor(interaction)
+        target = await db(common.get_or_create_player, player.id, player.display_name)
+        now_standing = await db(standing.adjust_strikes, community, target, delta, staff, reason)
+        policy = await db(standing.strike_policy, community)
+        await reply(
+            interaction, f"{player.display_name}: {standing.describe(now_standing, policy)}"
+        )
+
+    await guarded(interaction, run)
+
+
+captain_group = app_commands.Group(name="captain", description="Staff: who may captain")
+
+
+async def _set_captain(
+    interaction: Interaction[Any], player: discord.Member, status: str, reason: str
+) -> None:
+    community = await _staff_start(interaction)
+    staff = await actor(interaction)
+    target = await db(common.get_or_create_player, player.id, player.display_name)
+    await db(standing.set_override, community, target, status, staff, reason)
+    text = {
+        "allow": f"{player.display_name} can captain, whatever their games.",
+        "bar": f"{player.display_name} can't captain until staff clear it.",
+        "clear": f"{player.display_name} is back on the normal captain rule.",
+    }[status]
+    await reply(interaction, text)
+
+
+@captain_group.command(name="allow", description="Let a player captain before the match rule")
+async def captain_allow(interaction: Interaction[Any], player: discord.Member, reason: str) -> None:
+    await guarded(interaction, lambda: _set_captain(interaction, player, "allow", reason))
+
+
+@captain_group.command(name="bar", description="Stop a player from captaining")
+async def captain_bar(interaction: Interaction[Any], player: discord.Member, reason: str) -> None:
+    await guarded(interaction, lambda: _set_captain(interaction, player, "bar", reason))
+
+
+@captain_group.command(name="clear", description="Put a player back on the normal captain rule")
+async def captain_clear(interaction: Interaction[Any], player: discord.Member, reason: str) -> None:
+    await guarded(interaction, lambda: _set_captain(interaction, player, "clear", reason))
+
+
+ocr_group = app_commands.Group(name="ocr", description="Staff: reading report screenshots")
+
+
+def _set_ocr_mode(community: Community, mode: str) -> None:
+    if mode not in ocr.MODES:
+        raise InvalidAction("The mode is off, shadow or on.")
+    if mode != "off" and not ocr.available():
+        raise InvalidAction(
+            "Score OCR isn't installed here. Build the image with INSTALL_OCR=true first."
+        )
+    Community.objects.filter(pk=community.pk).update(score_ocr=mode)
+
+
+def _ocr_status_text(community: Community) -> str:
+    community.refresh_from_db(fields=["score_ocr"])
+    reads = ScoreboardRead.objects.filter(match__community=community)
+    total = reads.count()
+    by_status = dict(reads.values("status").annotate(n=Count("id")).values_list("status", "n"))
+    installed = "installed" if ocr.available() else "not installed"
+    lines = [f"Score OCR is **{community.score_ocr}** ({installed}). {total} reads so far."]
+    if total:
+        lines.append(", ".join(f"{status}: {n}" for status, n in sorted(by_status.items())))
+    return "\n".join(lines)
+
+
+@ocr_group.command(name="mode", description="Turn reading report screenshots off, shadow or on")
+@app_commands.choices(
+    mode=[
+        app_commands.Choice(name="Off", value="off"),
+        app_commands.Choice(name="Shadow: store stats only", value="shadow"),
+        app_commands.Choice(name="On: stats, MVP and key players, cross-checks", value="on"),
+    ]
+)
+async def ocr_mode(interaction: Interaction[Any], mode: app_commands.Choice[str]) -> None:
+    async def run() -> None:
+        community = await _staff_start(interaction)
+        await db(_set_ocr_mode, community, mode.value)
+        await reply(interaction, f"Score OCR is now {mode.value}. New reports use it.")
+
+    await guarded(interaction, run)
+
+
+@ocr_group.command(name="status", description="Whether score OCR runs, and how reads have gone")
+async def ocr_status(interaction: Interaction[Any]) -> None:
+    async def run() -> None:
+        community = await _staff_start(interaction)
+        await reply(interaction, await db(_ocr_status_text, community))
 
     await guarded(interaction, run)
 
@@ -432,5 +679,133 @@ async def ledger_check(interaction: Interaction[Any]) -> None:
     await guarded(interaction, run)
 
 
-GROUPS: tuple[app_commands.Group, ...] = (match_group, penalty_group, mode_group, roster_group)
+deadlock_group = app_commands.Group(
+    name="deadlock", description="Staff: deadlock-api lobbies, result checks and Steam links"
+)
+
+
+def _save_deadlock_settings(
+    community: Community, auto_lobby: bool | None, region: str | None, check_results: bool | None
+) -> Community:
+    fields = []
+    if region is not None:
+        cleaned = region.strip().lower()
+        if cleaned and cleaned not in deadlock_api.SERVER_REGIONS:
+            raise InvalidAction("Unknown region. Start typing to see the list.")
+        community.lobby_region = cleaned
+        fields.append("lobby_region")
+    if auto_lobby is not None:
+        community.auto_lobby = auto_lobby
+        fields.append("auto_lobby")
+    if check_results is not None:
+        community.api_results = check_results
+        fields.append("api_results")
+    if fields:
+        community.save(update_fields=fields)
+    return community
+
+
+def _deadlock_status_text(community: Community) -> str:
+    community.refresh_from_db()
+    checks = ApiMatchCheck.objects.filter(match__community=community)
+    by_status = dict(checks.values("status").annotate(n=Count("id")).values_list("status", "n"))
+    linked = Player.objects.filter(steam_account_id__isnull=False)
+    lines = [
+        f"Automatic lobbies: **{'on' if community.auto_lobby else 'off'}**"
+        f" (region {community.lobby_region or 'API default'}).",
+        f"Result checks: **{'on' if community.api_results else 'off'}**.",
+        f"Steam links: {linked.count()}, "
+        f"{linked.exclude(steam_verified_at=None).count()} verified.",
+    ]
+    if by_status:
+        lines.append(
+            "Checks so far: " + ", ".join(f"{s}: {n}" for s, n in sorted(by_status.items()))
+        )
+    if not settings.DEADLOCK_API_KEY:
+        lines.append("-# No API key: lobbies are limited to 10 an hour from this server's IP.")
+    return "\n".join(lines)
+
+
+async def _region_autocomplete(
+    _interaction: Interaction[Any], current: str
+) -> list[app_commands.Choice[str]]:
+    matches = [r for r in deadlock_api.SERVER_REGIONS if current.lower() in r]
+    return [app_commands.Choice(name=r, value=r) for r in matches[:25]]
+
+
+@deadlock_group.command(name="settings", description="Automatic lobbies, region, result checks")
+@app_commands.describe(
+    auto_lobby="Have deadlock-api's bot create each match's lobby",
+    region="Lobby server region. Leave empty for the API's default",
+    check_results="Check reported results against deadlock-api by match ID",
+)
+@app_commands.autocomplete(region=_region_autocomplete)
+async def deadlock_settings(
+    interaction: Interaction[Any],
+    auto_lobby: bool | None = None,
+    region: str | None = None,
+    check_results: bool | None = None,
+) -> None:
+    async def run() -> None:
+        community = await _staff_start(interaction)
+        await db(_save_deadlock_settings, community, auto_lobby, region, check_results)
+        await reply(interaction, await db(_deadlock_status_text, community))
+
+    await guarded(interaction, run)
+
+
+@deadlock_group.command(name="status", description="Lobby and result-check settings and counts")
+async def deadlock_status(interaction: Interaction[Any]) -> None:
+    async def run() -> None:
+        community = await _staff_start(interaction)
+        await reply(interaction, await db(_deadlock_status_text, community))
+
+    await guarded(interaction, run)
+
+
+@transaction.atomic
+def _set_match_id(community: Community, match_id: int, deadlock_match_id: int) -> None:
+    match = common.lock_match(_get_match(community, match_id).pk)
+    if match.deadlock_match_id not in (None, deadlock_match_id):
+        # Staff correcting a wrong ID: this is the one place an ID is replaced.
+        Match.objects.filter(pk=match.pk).update(deadlock_match_id=None)
+        match.deadlock_match_id = None
+    if not api_results.set_deadlock_match_id(match, deadlock_match_id):
+        api_results.schedule(match, attempt=ApiMatchCheck.objects.filter(match=match).count() + 1)
+
+
+@deadlock_group.command(name="check", description="Set a match's Deadlock ID and check it now")
+async def deadlock_check(
+    interaction: Interaction[Any], match_id: int, deadlock_match_id: int
+) -> None:
+    async def run() -> None:
+        community = await _staff_start(interaction)
+        await db(_set_match_id, community, match_id, deadlock_match_id)
+        await reply(
+            interaction, f"Checking match #{match_id} against Deadlock {deadlock_match_id}."
+        )
+
+    await guarded(interaction, run)
+
+
+@deadlock_group.command(name="unlink", description="Remove a player's linked Steam account")
+async def deadlock_unlink(interaction: Interaction[Any], player: discord.Member) -> None:
+    async def run() -> None:
+        await _staff_start(interaction)
+        target = await db(common.get_or_create_player, player.id, player.display_name)
+        removed = await db(steam.unlink, target)
+        await reply(interaction, "Unlinked." if removed else "They had no Steam account linked.")
+
+    await guarded(interaction, run)
+
+
+GROUPS: tuple[app_commands.Group, ...] = (
+    match_group,
+    penalty_group,
+    mode_group,
+    roster_group,
+    captain_group,
+    ocr_group,
+    deadlock_group,
+)
 COMMANDS: tuple[app_commands.Command[Any, Any, Any], ...] = (ledger_check,)

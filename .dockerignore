@@ -10,7 +10,8 @@ research_notes
 reports
 staticfiles
 tests
-scoreocr/
+# scoreocr/ is code the bot imports when built with INSTALL_OCR=true; only its output stays out.
+scoreocr/__pycache__/
 tests/fixtures/scoreboard_sample.*
 
 # Local env copies: never baked into images or committed.
@@ -23,3 +24,5 @@ scoreocr_out/
 !.env.example
 .bot-heartbeat
 scoreocr_out/
+
+backups/

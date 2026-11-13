@@ -64,11 +64,7 @@ class DraftBot(discord.Client):
     async def setup_hook(self) -> None:
         self.add_dynamic_items(RouteButton, RouteSelect, RouteUserSelect)
         commands: tuple[Any, ...] = (
-            player.leaderboard_command,
-            player.stats_command,
-            player.submit_command,
-            player.queue_group,
-            player.rating_group,
+            *player.COMMANDS,
             setup.setup_command,
             *staff.GROUPS,
             *staff.COMMANDS,

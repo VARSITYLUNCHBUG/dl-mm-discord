@@ -1,7 +1,11 @@
 name: dl-mm-discord
 
 x-app: &app
-  build: .
+  build:
+    context: .
+    args:
+      # true to read report screenshots with score OCR. Then run /ocr mode in Discord.
+      INSTALL_OCR: ${INSTALL_OCR:-false}
   image: dl-mm-discord:latest
   env_file: .env
   environment:

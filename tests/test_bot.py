@@ -505,8 +505,11 @@ def test_results_show_each_teams_change(popped: Match) -> None:
     assert "attachment://match-1.png" in payload
     captain = boards.captain_names(match)["A"]
     assert f"{captain}'s Team won" in payload
-    assert "> **+16** | __1016__ | " in team_table(model.team_a)
-    assert "> **-16** | __984__ | " in team_table(model.team_b)
+    # New players show a conservative 0, so one game can leave the shown number where it was.
+    winner, loser = model.team_a[0], model.team_b[0]
+    assert winner.after >= winner.before and loser.after <= loser.before
+    assert f"> **{winner.delta:+d}** | " in team_table(model.team_a)
+    assert f"__{winner.after}__" in team_table(model.team_a)
     for word in ("Team A", "Team B", "Hidden King", "Archmother", "K 32"):
         assert word not in payload
 
@@ -1012,6 +1015,36 @@ def test_queue_message_is_created_once_then_edited(wired: Community) -> None:
     drain(gateway)
     wired.refresh_from_db()
     assert wired.queue_message_id == first
+
+
+@pytest.mark.django_db(transaction=True)
+def test_a_join_while_the_queue_renders_gets_a_render_of_its_own(
+    wired: Community, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A render reads the queue before it edits Discord, so a join in between needs another."""
+    gateway = FakeGateway()
+    first, second = make_player(1), make_player(2)
+    queue.join(wired.pk, first)
+    read_queue = boards.queue_view
+
+    def join_after_the_read(row: Community) -> boards.QueueView:
+        view = read_queue(row)
+        if view.size == 1:
+            queue.join(wired.pk, second)
+        return view
+
+    monkeypatch.setattr(boards, "queue_view", join_after_the_read)
+    drain(gateway)
+    wired.refresh_from_db()
+    assert "2/12" in str(gateway.views[wired.queue_message_id].to_components())
+    assert OutboxEffect.objects.filter(kind="render_queue", status=EffectStatus.DONE).count() == 2
+
+
+@pytest.mark.django_db(transaction=True)
+def test_a_render_requested_before_one_starts_still_coalesces(wired: Community) -> None:
+    request_queue(wired)
+    request_queue(wired)
+    assert OutboxEffect.objects.filter(kind="render_queue").count() == 1
 
 
 @pytest.mark.django_db(transaction=True)

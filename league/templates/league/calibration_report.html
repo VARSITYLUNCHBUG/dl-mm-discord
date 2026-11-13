@@ -1,0 +1,149 @@
+{% with r=view.report %}
+<h2>{{ heading }}</h2>
+{% if not r.matches %}
+  <p>No rated matches in this season yet.</p>
+{% else %}
+<div class="tiles">
+  <div class="tile">
+    <div class="label">Rated matches</div>
+    <div class="value">{{ r.matches }}</div>
+    <div class="note">{{ r.lopsided }} predicted outside 40&ndash;60%</div>
+  </div>
+  <div class="tile">
+    <div class="label">Brier score (lower is better)</div>
+    <div class="value">{{ r.brier|floatformat:4 }}</div>
+    <div class="note">Always guessing 50%: {{ brier_baseline|floatformat:4 }}
+      {% if view.brier_better %}<span class="good">Better</span>{% else %}<span class="warn">No better yet</span>{% endif %}</div>
+  </div>
+  <div class="tile">
+    <div class="label">Log loss (lower is better)</div>
+    <div class="value">{{ r.log_loss|floatformat:4 }}</div>
+    <div class="note">Always guessing 50%: {{ loss_baseline|floatformat:4 }}
+      {% if view.loss_better %}<span class="good">Better</span>{% else %}<span class="warn">No better yet</span>{% endif %}</div>
+  </div>
+  <div class="tile">
+    <div class="label">Favourite won</div>
+    <div class="value">{% widthratio r.favourite.hits r.favourite.total 100 %}%</div>
+    <div class="note">{{ r.favourite.hits }} of {{ r.favourite.total }} with a favourite</div>
+  </div>
+  <div class="tile">
+    <div class="label">Hidden King won</div>
+    <div class="value">{% widthratio r.hidden_king.hits r.hidden_king.total 100 %}%</div>
+    <div class="note">{{ r.hidden_king.hits }} of {{ r.hidden_king.total }}. 50% means no side bias</div>
+  </div>
+  <div class="tile">
+    <div class="label">Players in placement</div>
+    <div class="value">{{ r.placement }}</div>
+    <div class="note">of {{ r.players }} rated this season</div>
+  </div>
+  <div class="tile">
+    <div class="label">Found in deadlock-api</div>
+    <div class="value">{% if r.api_hit.total %}{% widthratio r.api_hit.hits r.api_hit.total 100 %}%{% else %}&ndash;{% endif %}</div>
+    <div class="note">{{ r.api_hit.hits }} of {{ r.api_hit.total }} matches with a Deadlock ID</div>
+  </div>
+</div>
+
+<div class="charts">
+  <figure>
+    {{ view.calibration_svg }}
+    <figcaption>Each dot is a 10% band of predictions; the line is its 95% interval. Dots near the
+    dashed diagonal mean the predicted chances came true about that often.</figcaption>
+  </figure>
+  <figure>
+    {{ view.sigma_svg }}
+    <figcaption>How sure the system is about each player. New players start near 8.3 and it
+    falls slowly in 6v6, which is why placement counts games rather than this.</figcaption>
+  </figure>
+</div>
+
+<details>
+  <summary>Calibration table</summary>
+  <table>
+    <thead><tr><th>Predicted</th><th class="num">Mean prediction</th><th class="num">Matches</th>
+      <th class="num">Team A won</th><th class="num">Rate</th></tr></thead>
+    <tbody>
+    {% for b in r.bins %}
+      <tr><td>{% widthratio b.low 1 100 %}&ndash;{% widthratio b.high 1 100 %}%</td>
+        <td class="num">{% widthratio b.mean_predicted 1 100 %}%</td>
+        <td class="num">{{ b.games }}</td><td class="num">{{ b.wins }}</td>
+        <td class="num">{% widthratio b.wins b.games 100 %}%</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</details>
+<details>
+  <summary>Uncertainty table</summary>
+  <table>
+    <thead><tr><th>Sigma</th><th class="num">Players</th></tr></thead>
+    <tbody>{% for label, count in r.sigma_bins %}<tr><td>{{ label }}</td><td class="num">{{ count }}</td></tr>{% endfor %}</tbody>
+  </table>
+</details>
+
+<h3>Do MVP and key-player awards mean anything?</h3>
+{% if view.signal %}
+<div class="tiles">
+  <div class="tile">
+    <div class="label">After an award, next {{ view.signal.horizon }} matches</div>
+    <div class="value">{{ view.signal.holders }}</div>
+    <div class="note">points against the prediction, over {{ view.signal.holders_n }} awards</div>
+  </div>
+  <div class="tile">
+    <div class="label">Everyone else, next {{ view.signal.horizon }} matches</div>
+    <div class="value">{{ view.signal.others }}</div>
+    <div class="note">points against the prediction, {{ view.signal.others_n }} cases</div>
+  </div>
+  <div class="tile">
+    <div class="label">Difference</div>
+    <div class="value">{{ view.signal.difference }}</div>
+    <div class="note">95% roughly {{ view.signal.range }}. {{ view.signal.verdict }}</div>
+  </div>
+</div>
+<p class="lede">If award holders keep beating their predictions afterwards, awards carry skill the
+rating hasn't caught yet, and the bonus could grow a little. If the interval spans zero, there's no
+evidence either way; keep the bonus small. Matches overlap, so treat the interval as rough.</p>
+{% else %}
+<p>Not enough awarded players with later matches yet.</p>
+{% endif %}
+
+<div class="side">
+  <div>
+    <h3>Award share frozen</h3>
+    <table><tbody>
+      {% for name, mvps, games in r.farming %}<tr><td>{{ name }}</td><td class="num">{{ mvps }} MVP in {{ games }}</td></tr>
+      {% empty %}<tr><td>Nobody</td></tr>{% endfor %}
+    </tbody></table>
+    <p class="lede">An MVP rate over twice chance, across 20+ matches. It lifts by itself.
+    {{ r.frozen_matches }} match{{ r.frozen_matches|pluralize:"es" }} rated with a freeze.
+    {{ r.left_early }} player{{ r.left_early|pluralize }} left a game early.</p>
+  </div>
+  <div>
+    <h3>Awards by source</h3>
+    <table><tbody>
+      {% for source, count in r.award_sources.items %}<tr><td>{{ source }}</td><td class="num">{{ count }}</td></tr>
+      {% empty %}<tr><td>None yet</td></tr>{% endfor %}
+    </tbody></table>
+  </div>
+  <div>
+    <h3>Most MVP awards</h3>
+    <table><tbody>
+      {% for name, count in r.top_mvps %}<tr><td>{{ name }}</td><td class="num">{{ count }}</td></tr>
+      {% empty %}<tr><td>None yet</td></tr>{% endfor %}
+    </tbody></table>
+  </div>
+  <div>
+    <h3>Scoreboard reads</h3>
+    <table><tbody>
+      {% for status, count in r.ocr.items %}<tr><td>{{ status }}</td><td class="num">{{ count }}</td></tr>
+      {% empty %}<tr><td>None yet</td></tr>{% endfor %}
+    </tbody></table>
+  </div>
+  <div>
+    <h3>deadlock-api checks</h3>
+    <table><tbody>
+      {% for status, count in r.api.items %}<tr><td>{{ status }}</td><td class="num">{{ count }}</td></tr>
+      {% empty %}<tr><td>None yet</td></tr>{% endfor %}
+    </tbody></table>
+  </div>
+</div>
+{% endif %}
+{% endwith %}

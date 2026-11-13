@@ -34,7 +34,7 @@ def ready_all(match: Match) -> Match:
 def vote_captains(match: Match) -> Match:
     """Settle the captain vote: everyone votes for the first two players by ID.
 
-    With the votes tied, Elo, then games, then the seed decide who captains team A.
+    With the votes tied, skill, then games, then the seed decide who captains team A.
     """
     match = fresh(match)
     if match.status == Status.CAPTAIN_PHASE:

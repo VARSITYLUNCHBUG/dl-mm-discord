@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import discord
@@ -8,6 +9,7 @@ from discord import Interaction
 from bot.db import db
 from bot.handlers.common import actor
 from bot.routing import Context, guarded, handles, reply
+from league.integrations import deadlock_api
 from league.models import Player
 from league.services import draft
 
@@ -97,3 +99,19 @@ async def code_open(ctx: Context) -> None:
     player = await actor(ctx.interaction)
     await db(draft.check_lobby_host, ctx.match_id, player)
     await ctx.interaction.response.send_modal(LobbyCodeModal(ctx.match_id, player))
+
+
+@handles("api_start")
+async def api_start(ctx: Context) -> None:
+    """A captain starts the bot-hosted lobby once everyone is seated."""
+    await ctx.interaction.response.defer(ephemeral=True, thinking=True)
+    player = await actor(ctx.interaction)
+    party_id = await db(draft.check_can_start_api, ctx.match_id, player)
+    try:
+        await asyncio.to_thread(deadlock_api.start_custom_match, party_id)
+    except deadlock_api.ApiError as exc:
+        hint = "Try again in a moment." if exc.rate_limited else "Start it from the game instead."
+        await reply(ctx.interaction, f"deadlock-api couldn't start the match. {hint}")
+        return
+    await db(draft.mark_api_started, ctx.match_id, player)
+    await reply(ctx.interaction, "Started.")

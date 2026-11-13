@@ -1,0 +1,243 @@
+{
+ "match_info": {
+  "match_id": 900000001,
+  "duration_s": 2210,
+  "winning_team": 0,
+  "match_outcome": 0,
+  "start_time": 1793912493,
+  "game_mode": 1,
+  "players": [
+   {
+    "account_id": 100000101,
+    "player_slot": 11,
+    "team": 1,
+    "kills": 9,
+    "deaths": 6,
+    "assists": 29,
+    "net_worth": 39827,
+    "hero_id": 15,
+    "mvp_rank": null,
+    "stats": [
+     {
+      "time_stamp_s": 2210,
+      "player_damage": 36355,
+      "player_healing": 7743,
+      "net_worth": 39827
+     }
+    ]
+   },
+   {
+    "account_id": 100000102,
+    "player_slot": 8,
+    "team": 1,
+    "kills": 10,
+    "deaths": 7,
+    "assists": 31,
+    "net_worth": 38193,
+    "hero_id": 72,
+    "mvp_rank": null,
+    "stats": [
+     {
+      "time_stamp_s": 2210,
+      "player_damage": 46825,
+      "player_healing": 16420,
+      "net_worth": 38193
+     }
+    ]
+   },
+   {
+    "account_id": 100000001,
+    "player_slot": 2,
+    "team": 0,
+    "kills": 8,
+    "deaths": 11,
+    "assists": 16,
+    "net_worth": 38568,
+    "hero_id": 1,
+    "mvp_rank": null,
+    "stats": [
+     {
+      "time_stamp_s": 2210,
+      "player_damage": 31069,
+      "player_healing": 8648,
+      "net_worth": 38568
+     }
+    ]
+   },
+   {
+    "account_id": 100000103,
+    "player_slot": 10,
+    "team": 1,
+    "kills": 19,
+    "deaths": 5,
+    "assists": 30,
+    "net_worth": 43552,
+    "hero_id": 78,
+    "mvp_rank": 2,
+    "stats": [
+     {
+      "time_stamp_s": 2210,
+      "player_damage": 59419,
+      "player_healing": 5603,
+      "net_worth": 43552
+     }
+    ]
+   },
+   {
+    "account_id": 100000104,
+    "player_slot": 9,
+    "team": 1,
+    "kills": 3,
+    "deaths": 11,
+    "assists": 23,
+    "net_worth": 39004,
+    "hero_id": 63,
+    "mvp_rank": null,
+    "stats": [
+     {
+      "time_stamp_s": 2210,
+      "player_damage": 16921,
+      "player_healing": 5673,
+      "net_worth": 39004
+     }
+    ]
+   },
+   {
+    "account_id": 100000002,
+    "player_slot": 4,
+    "team": 0,
+    "kills": 5,
+    "deaths": 9,
+    "assists": 14,
+    "net_worth": 36274,
+    "hero_id": 35,
+    "mvp_rank": null,
+    "stats": [
+     {
+      "time_stamp_s": 2210,
+      "player_damage": 46910,
+      "player_healing": 9323,
+      "net_worth": 36274
+     }
+    ]
+   },
+   {
+    "account_id": 100000003,
+    "player_slot": 3,
+    "team": 0,
+    "kills": 6,
+    "deaths": 11,
+    "assists": 17,
+    "net_worth": 35613,
+    "hero_id": 86,
+    "mvp_rank": null,
+    "stats": [
+     {
+      "time_stamp_s": 2210,
+      "player_damage": 29888,
+      "player_healing": 11445,
+      "net_worth": 35613
+     }
+    ]
+   },
+   {
+    "account_id": 100000105,
+    "player_slot": 12,
+    "team": 1,
+    "kills": 2,
+    "deaths": 5,
+    "assists": 37,
+    "net_worth": 39845,
+    "hero_id": 11,
+    "mvp_rank": null,
+    "stats": [
+     {
+      "time_stamp_s": 2210,
+      "player_damage": 22280,
+      "player_healing": 45359,
+      "net_worth": 39844
+     }
+    ]
+   },
+   {
+    "account_id": 100000004,
+    "player_slot": 1,
+    "team": 0,
+    "kills": 12,
+    "deaths": 8,
+    "assists": 13,
+    "net_worth": 40268,
+    "hero_id": 52,
+    "mvp_rank": 1,
+    "stats": [
+     {
+      "time_stamp_s": 2210,
+      "player_damage": 37557,
+      "player_healing": 16063,
+      "net_worth": 40268
+     }
+    ]
+   },
+   {
+    "account_id": 100000106,
+    "player_slot": 7,
+    "team": 1,
+    "kills": 16,
+    "deaths": 8,
+    "assists": 30,
+    "net_worth": 38148,
+    "hero_id": 31,
+    "mvp_rank": 3,
+    "stats": [
+     {
+      "time_stamp_s": 2210,
+      "player_damage": 48016,
+      "player_healing": 9646,
+      "net_worth": 38148
+     }
+    ]
+   },
+   {
+    "account_id": 100000005,
+    "player_slot": 6,
+    "team": 0,
+    "kills": 7,
+    "deaths": 14,
+    "assists": 20,
+    "net_worth": 35969,
+    "hero_id": 88,
+    "mvp_rank": null,
+    "stats": [
+     {
+      "time_stamp_s": 2210,
+      "player_damage": 54173,
+      "player_healing": 15124,
+      "net_worth": 35969
+     }
+    ]
+   },
+   {
+    "account_id": 100000006,
+    "player_slot": 5,
+    "team": 0,
+    "kills": 4,
+    "deaths": 8,
+    "assists": 20,
+    "net_worth": 38575,
+    "hero_id": 50,
+    "mvp_rank": null,
+    "stats": [
+     {
+      "time_stamp_s": 2210,
+      "player_damage": 54319,
+      "player_healing": 2831,
+      "net_worth": 38575
+     }
+    ]
+   }
+  ]
+ },
+ "hero_build_ids": {},
+ "pregame_hero_ids": {},
+ "banned_hero_ids": []
+}

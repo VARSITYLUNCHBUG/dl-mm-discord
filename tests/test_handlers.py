@@ -519,7 +519,7 @@ def test_stats_and_leaderboard_commands(wired: Community) -> None:
     player = make_player(1)
     interaction = fake_interaction(player)
     run_command(player_commands.stats_command, interaction)
-    assert "1000" in replies(interaction)[0]
+    assert "Bronze" in replies(interaction)[0]
     interaction = fake_interaction(player)
     run_command(player_commands.leaderboard_command, interaction)
     assert "10 games" in replies(interaction)[0]
@@ -568,7 +568,7 @@ def test_staff_commands_refuse_non_staff(wired: Community) -> None:
         subcommand(player_commands.rating_group, "seed"),
         interaction,
         player=member(target),
-        rating=2000,
+        band=app_commands.Choice(name="High", value="high"),
     )
     assert "Only staff" in replies(interaction)[0]
     assert open_season(wired).ratings.count() == 0
@@ -582,18 +582,18 @@ def test_seed_and_adjust_commands(wired: Community) -> None:
         subcommand(player_commands.rating_group, "seed"),
         interaction,
         player=member(target),
-        rating=1400,
+        band=app_commands.Choice(name="High", value="high"),
     )
-    assert "now 1400" in replies(interaction)[0]
+    assert "seeded high" in replies(interaction)[0]
     interaction = fake_interaction(admin, administrator=True)
     run_command(
         subcommand(player_commands.rating_group, "adjust"),
         interaction,
         player=member(target),
-        delta=-50,
+        delta=40,
         reason="Conduct",
     )
-    assert "now 1350" in replies(interaction)[0]
+    assert "now 440" in replies(interaction)[0]  # High seed shows 400; +40 points of skill.
     assert integrity.check_all() == []
 
 
@@ -753,7 +753,7 @@ def test_roster_sync_command_previews_then_applies(
 
 
 def test_ledger_check_command(wired: Community) -> None:
-    ratings.seed_player(open_season(wired), make_player(1), 1100, actor=None)
+    ratings.seed_player(open_season(wired), make_player(1), "mid", actor=None)
     interaction = fake_interaction(make_player(50), administrator=True)
     run_command(staff.ledger_check, interaction)
     assert replies(interaction) == ["Ledger OK."]
@@ -766,11 +766,7 @@ def test_every_command_serialises_for_discord() -> None:
     client = discord.Client(intents=discord.Intents.none())
     tree = app_commands.CommandTree(client)
     for command in (
-        player_commands.leaderboard_command,
-        player_commands.stats_command,
-        player_commands.submit_command,
-        player_commands.queue_group,
-        player_commands.rating_group,
+        *player_commands.COMMANDS,
         setup_commands.setup_command,
         *staff.GROUPS,
         *staff.COMMANDS,
@@ -779,6 +775,7 @@ def test_every_command_serialises_for_discord() -> None:
     payloads = [command.to_dict(tree) for command in tree.get_commands()]
     names = {payload["name"] for payload in payloads}
     assert {"queue", "rating", "match", "penalty", "mode", "roster", "setup", "submit"} <= names
+    assert {"link", "unlink", "captain", "ocr", "deadlock"} <= names
     rating = next(payload for payload in payloads if payload["name"] == "rating")
     assert {option["name"] for option in rating["options"]} == {"history", "seed", "adjust"}
     queue_payload = next(payload for payload in payloads if payload["name"] == "queue")

@@ -13,6 +13,7 @@ dependencies = [
     "pydantic>=2.10,<3",
     "pyyaml>=6",
     "whitenoise>=6.9",
+    "openskill>=6.2,<7",
 ]
 
 [dependency-groups]

@@ -95,6 +95,8 @@ class EffectWorker:
             await db(effects.mark_failed, effect.pk, f"No handler for {effect.kind}")
             logger.error("Unknown effect kind", extra={"kind": effect.kind})
             return True
+        if not await db(effects.mark_started, effect.pk):
+            return True  # Finished or cancelled since it was fetched.
         env = Env(self.gateway, effect, effect.community, effect.match)
         try:
             await handler(env)

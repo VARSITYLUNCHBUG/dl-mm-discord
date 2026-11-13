@@ -92,14 +92,21 @@ def _team_heading(state: BoardState, team: str, lines: list[PlayerLine]) -> str:
     side = ""
     if state.hidden_king_team:
         side = " · Hidden King" if state.hidden_king_team == team else " · The Archmother"
-    return f"**{state.team_name(team)}**{side} · avg {average}"
+    chance = ""
+    if state.win_chance_a is not None:
+        value = state.win_chance_a if team == "A" else 1 - state.win_chance_a
+        lopsided = " ⚠️" if not 0.4 <= state.win_chance_a <= 0.6 else ""
+        chance = f" · {value:.0%} to win{lopsided}"
+    return f"**{state.team_name(team)}**{side} · avg {average}{chance}"
 
 
 def _team_block(state: BoardState, team: str) -> str:
     lines = _team(state, team)
     if not lines:
         return f"**{state.team_name(team)}**\n-"
-    rows = [f"{'👑 ' if line.is_captain else ''}{line.name} ({line.rating})" for line in lines]
+    rows = [
+        f"{'👑 ' if line.is_captain else ''}{line.name} ({line.rating_label})" for line in lines
+    ]
     return f"{_team_heading(state, team, lines)}\n" + "\n".join(rows)
 
 
@@ -134,29 +141,40 @@ def _chunks(items: list[Any], size: int = SELECT_LIMIT) -> list[list[Any]]:
 
 def _ready(state: BoardState, box: Container[Any]) -> None:
     ready = sum(player.is_ready for player in state.players)
-    rows = [f"{'✅' if p.is_ready else '⏳'} {p.name} ({p.rating})" for p in state.players]
+    rows = [f"{'✅' if p.is_ready else '⏳'} {p.name} ({p.rating_label})" for p in state.players]
     box.add_item(TextDisplay(f"{ready}/{len(state.players)} ready\n" + "\n".join(rows)))
     box.add_item(
         ActionRow(RouteButton("ready", state.match_id, label="Ready", style=ButtonStyle.success))
     )
 
 
+def _vote_row(state: BoardState, player: PlayerLine) -> str:
+    mark = "✅" if player.player_id in state.voted_ids else "⏳"
+    lock = "" if player.captain_ok else f" 🔒 {player.captain_note}"
+    return f"{mark} {player.name} ({player.rating_label}){lock}"
+
+
 def _captain_vote(state: BoardState, box: Container[Any]) -> None:
     voted = len(state.voted_ids)
-    rows = [
-        f"{'✅' if p.player_id in state.voted_ids else '⏳'} {p.name} ({p.rating})"
-        for p in state.players
-    ]
+    rows = [_vote_row(state, p) for p in state.players]
+    rule = (
+        f" Captains need {state.captain_min_games} completed matches."
+        if state.captain_min_games
+        else ""
+    )
     box.add_item(
         TextDisplay(
             f"Vote for up to two captains. {voted}/{len(state.players)} voted. "
-            "Most votes wins; Elo breaks ties and fills any gap.\n" + "\n".join(rows)
+            f"Most votes wins; rating breaks ties and fills any gap.{rule}\n" + "\n".join(rows)
         )
     )
+    able = [p for p in state.players if p.captain_ok]
     options = [
-        SelectOption(label=f"{p.name} ({p.rating})"[:100], value=str(p.player_id))
-        for p in state.players[:SELECT_LIMIT]
+        SelectOption(label=f"{p.name} ({p.rating_label})"[:100], value=str(p.player_id))
+        for p in able[:SELECT_LIMIT]
     ]
+    if not options:  # Staff barred someone mid-vote. The timeout fills captains by experience.
+        return
     box.add_item(
         ActionRow(
             RouteSelect(
@@ -229,7 +247,7 @@ def _player_button(state: BoardState, player: PlayerLine) -> RouteButton:
         "pick_player",
         state.match_id,
         f"{state.step_index}.{player.player_id}",
-        label=f"{player.name} ({player.rating})"[:80],
+        label=f"{player.name} ({player.rating_label})"[:80],
         style=ButtonStyle.secondary if player.team else ButtonStyle.primary,
         disabled=bool(player.team),
     )
@@ -351,7 +369,17 @@ def _lobby_code(state: BoardState, box: Container[Any]) -> None:
         box.add_item(MediaGallery(discord.MediaGalleryItem(state.gif_url)))
     box.add_item(TextDisplay("# GLHF"))
     box.add_item(Separator())
-    box.add_item(TextDisplay(f"**{state.host_name}** hosts: create the custom lobby.\n{CHECKLIST}"))
+    if state.auto_lobby:
+        box.add_item(
+            TextDisplay(
+                "The bot is creating the lobby. If it can't, "
+                f"**{state.host_name}** hosts: create it yourself.\n{CHECKLIST}"
+            )
+        )
+    else:
+        box.add_item(
+            TextDisplay(f"**{state.host_name}** hosts: create the custom lobby.\n{CHECKLIST}")
+        )
     box.add_item(
         ActionRow(
             RouteButton(
@@ -363,6 +391,25 @@ def _lobby_code(state: BoardState, box: Container[Any]) -> None:
 
 def _in_progress(state: BoardState, box: Container[Any]) -> None:
     box.add_item(TextDisplay(f"### Lobby code: `{state.lobby_code}`"))
+    if state.api_lobby and not state.api_started:
+        leaves = (
+            f" The bot leaves the lobby <t:{int(state.api_leaves_at.timestamp())}:R>."
+            if state.api_leaves_at
+            else ""
+        )
+        box.add_item(
+            TextDisplay(
+                "The bot is hosting. Join with the code and sit on your team's side, then a "
+                f"captain presses Start match.{leaves}"
+            )
+        )
+        box.add_item(
+            ActionRow(
+                RouteButton(
+                    "api_start", state.match_id, label="Start match", style=ButtonStyle.success
+                )
+            )
+        )
     box.add_item(Separator())
     box.add_item(TextDisplay(_final_draft_summary(state)))
     box.add_item(Separator())
@@ -384,6 +431,38 @@ def _in_progress(state: BoardState, box: Container[Any]) -> None:
     if state.deadline_at is not None:
         box.add_item(
             TextDisplay(f"-# Report by {_stamp(state.deadline_at, 't')}, or staff will step in.")
+        )
+    _early_leave(state, box)
+
+
+def _early_leave(state: BoardState, box: Container[Any]) -> None:
+    """Someone left in the first minutes: report it, or answer a report."""
+    if state.early_leave_name:
+        box.add_item(Separator())
+        box.add_item(
+            TextDisplay(
+                f"**{state.early_leave_by}** says **{state.early_leave_name}** left in the first "
+                f"{state.early_leave_minutes} minutes. The other captain: agree to void the "
+                "match with no rating change, or disagree and staff decide."
+            )
+        )
+        box.add_item(
+            ActionRow(
+                RouteButton(
+                    "early_yes", state.match_id, label="Agree: void", style=ButtonStyle.danger
+                ),
+                RouteButton("early_no", state.match_id, label="Disagree"),
+            )
+        )
+    elif state.early_leave_open:
+        box.add_item(
+            ActionRow(
+                RouteButton(
+                    "early_open",
+                    state.match_id,
+                    label=f"Someone left in the first {state.early_leave_minutes} min",
+                )
+            )
         )
 
 

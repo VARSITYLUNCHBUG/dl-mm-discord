@@ -3,14 +3,17 @@ from __future__ import annotations
 from typing import Any
 
 import discord
-from discord.ui import Container, LayoutView, MediaGallery, Separator, TextDisplay
+from discord import ButtonStyle
+from discord.ui import ActionRow, Container, LayoutView, MediaGallery, Separator, TextDisplay
 
 from bot.renderers.board import player_mention
+from bot.routing import RouteButton
 from league.services.boards import CorrectionView, LeaderboardRow, ResultRow, ResultsView
 
 ACCENT = 0x57F287
 ACCENT_CORRECTION = 0xFEE75C
 FIGURE_SPACE = "\u2007"  # As wide as a digit, and Discord doesn't collapse it.
+AWARD_MARKS = {"mvp": "🏅", "key": "⭐"}
 
 
 def _quote_lines(rows: list[tuple[int, str, int, int]]) -> str:
@@ -34,7 +37,19 @@ def _quote_lines(rows: list[tuple[int, str, int, int]]) -> str:
 
 
 def team_table(rows: list[ResultRow]) -> str:
-    return _quote_lines([(r.discord_user_id, r.name, r.delta, r.after) for r in rows])
+    """The rating lines, with 🏅 MVP and ⭐ key-player marks and the scoreboard stats under each
+    player when there was a read."""
+    marked = [
+        (r.discord_user_id, f"{r.name}", r.delta, r.after) for r in rows
+    ]  # The mark goes after the mention, so the number columns still line up.
+    lines = _quote_lines(marked).split("\n") if rows else []
+    out = []
+    for row, line in zip(rows, lines, strict=True):
+        mark = AWARD_MARKS.get(row.award, "")
+        out.append(f"{line} {mark}".rstrip())
+        if row.stat_line:
+            out.append(f"> -# {row.stat_line}")
+    return "\n".join(out)
 
 
 def _team_section(view_model: ResultsView, team: str) -> str:
@@ -51,9 +66,15 @@ def _team_section(view_model: ResultsView, team: str) -> str:
 
 
 def render_results(view_model: ResultsView, *, attachment_name: str | None) -> LayoutView:
+    extras = []
+    if view_model.duration_s:
+        extras.append(f"{view_model.duration_s // 60}:{view_model.duration_s % 60:02d}")
+    if view_model.deadlock_match_id:
+        extras.append(f"Deadlock match {view_model.deadlock_match_id}")
+    tail = "".join(f" · {extra}" for extra in extras)
     title = (
         f"## Match #{view_model.match_id}: {view_model.team_name(view_model.winner)} won\n"
-        f"-# {view_model.team_name('A')} had a {view_model.expected_a:.0%} expected chance"
+        f"-# {view_model.team_name('A')} had a {view_model.expected_a:.0%} expected chance{tail}"
     )
     box: Container[Any] = Container(TextDisplay(title), accent_colour=ACCENT)
     box.add_item(TextDisplay(_team_section(view_model, "A")))
@@ -96,3 +117,22 @@ def leaderboard_text(rows: list[LeaderboardRow], minimum_games: int) -> str:
         for row in rows
     )
     return f"```\n{body}\n```"
+
+
+def render_scoreboard_notice(match_id: int, read_id: int, unmapped: int) -> LayoutView:
+    """Ask the captains to match the scoreboard names the reader couldn't place."""
+    noun = "name needs" if unmapped == 1 else "names need"
+    box: Container[Any] = Container(
+        TextDisplay(
+            f"**Scoreboard read:** {unmapped} {noun} matching to players. A captain can match "
+            "them, and the bot remembers in-game names for next time."
+        ),
+        ActionRow(
+            RouteButton(
+                "ocr_map", match_id, read_id, label="Match names", style=ButtonStyle.primary
+            )
+        ),
+    )
+    view = LayoutView(timeout=None)
+    view.add_item(box)
+    return view

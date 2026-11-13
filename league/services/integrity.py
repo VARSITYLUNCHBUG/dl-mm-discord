@@ -2,35 +2,46 @@
 
 from __future__ import annotations
 
+from collections import defaultdict
+from decimal import Decimal
+
 from django.db.models import Sum
 
-from league.models import PlayerRating, RatingEvent, RatingRun, Season
-from league.models.ratings import RunKind
+from league.models import MatchParticipant, PlayerRating, RatingEvent, Season
 from league.services.corrections import diff_against_ledger, fold_season
+from league.services.ratings import initial_state
+
+ZERO = Decimal(0)
 
 
 def check_season(season: Season) -> list[str]:
-    problems: list[str] = []
+    # MVP and key-player shares must cancel out within each team.
+    problems: list[str] = _award_problems(season)
 
-    # Every match-based run must be exactly zero-sum.
-    runs = RatingRun.objects.filter(season=season, kind__in=(RunKind.LIVE, RunKind.CORRECTION))
-    for run in runs:
-        total = run.events.aggregate(total=Sum("delta"))["total"] or 0
-        if total != 0:
-            problems.append(f"Run {run.idempotency_key} sums to {total}, not 0.")
-
-    # The projection must equal the start rating plus the ledger for each player.
-    ledger = dict(
-        RatingEvent.objects.filter(season=season)
+    # The projection must equal the start plus the ledger for each player.
+    start = initial_state(season)
+    ledger = {
+        player_id: (total or 0, mu or ZERO, sigma or ZERO)
+        for player_id, total, mu, sigma in RatingEvent.objects.filter(season=season)
         .values("player_id")
-        .annotate(total=Sum("delta"))
-        .values_list("player_id", "total")
-    )
+        .annotate(total=Sum("delta"), mu=Sum("mu_delta"), sigma=Sum("sigma_delta"))
+        .values_list("player_id", "total", "mu", "sigma")
+    }
     for row in PlayerRating.objects.filter(season=season):
-        expected = season.start_rating + ledger.get(row.player_id, 0)
-        if row.rating != expected:
+        total, mu, sigma = ledger.get(row.player_id, (0, ZERO, ZERO))
+        if row.rating != start.rating + total:
             problems.append(
-                f"Player {row.player_id}: projection {row.rating}, ledger says {expected}."
+                f"Player {row.player_id}: projection {row.rating}, "
+                f"ledger says {start.rating + total}."
+            )
+        if row.mu != start.mu + mu:
+            problems.append(
+                f"Player {row.player_id}: projection mu {row.mu}, ledger says {start.mu + mu}."
+            )
+        if row.sigma != start.sigma + sigma:
+            problems.append(
+                f"Player {row.player_id}: projection sigma {row.sigma}, "
+                f"ledger says {start.sigma + sigma}."
             )
     missing = set(ledger) - set(
         PlayerRating.objects.filter(season=season).values_list("player_id", flat=True)
@@ -43,18 +54,30 @@ def check_season(season: Season) -> list[str]:
     differences = diff_against_ledger(season, fold)
     if differences:
         problems.append(f"Replay differs from the ledger on {len(differences)} entries.")
-
-    # Everything except manual adjustments nets to zero across the season.
-    adjustments = (
-        RatingEvent.objects.filter(
-            season=season, run__kind__in=(RunKind.SEED, RunKind.ADMIN)
-        ).aggregate(total=Sum("delta"))["total"]
-        or 0
-    )
-    total_delta = sum(ledger.values())
-    if total_delta != adjustments:
-        problems.append(f"Ledger total {total_delta} does not equal adjustments {adjustments}.")
     return problems
+
+
+def _award_problems(season: Season) -> list[str]:
+    """MVP and key-player adjustments must net to exactly zero within each team."""
+    teams = {
+        (match_id, player_id): team
+        for match_id, player_id, team in MatchParticipant.objects.filter(
+            match__season=season
+        ).values_list("match_id", "player_id", "team")
+    }
+    sums: dict[tuple[int, str], Decimal] = defaultdict(lambda: ZERO)
+    rows = RatingEvent.objects.filter(season=season, award_adj__isnull=False).values_list(
+        "match_id", "player_id", "award_adj"
+    )
+    for match_id, player_id, adj in rows:
+        if adj is None:
+            continue
+        sums[(match_id, teams.get((match_id, player_id), "?"))] += adj
+    return [
+        f"Match {match_id} team {team}: awards sum to {total}, not 0."
+        for (match_id, team), total in sorted(sums.items())
+        if total != 0
+    ]
 
 
 def check_all() -> list[str]:

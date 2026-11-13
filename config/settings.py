@@ -131,6 +131,10 @@ DISCORD_TOKEN = os.environ.get("DISCORD_TOKEN", "")
 DISCORD_GUILD_ID = int(os.environ.get("DISCORD_GUILD_ID") or 0)
 BOT_HEARTBEAT_FILE = Path(os.environ.get("BOT_HEARTBEAT_FILE", BASE_DIR / ".bot-heartbeat"))
 DEADLOCK_API_BASE = os.environ.get("DEADLOCK_API_BASE", "https://api.deadlock-api.com")
+# Optional. Raises deadlock-api's limits, such as lobby creation from 10 an hour to 100 per 30 min.
+DEADLOCK_API_KEY = os.environ.get("DEADLOCK_API_KEY", "")
+# Optional. Only needed to link Steam accounts by a custom profile URL (/id/name).
+STEAM_WEB_API_KEY = os.environ.get("STEAM_WEB_API_KEY", "")
 
 # Fake players exist only for local smoke tests and are refused outside DEBUG.
 DEV_FAKE_PLAYERS = DEBUG and env_bool("DEV_FAKE_PLAYERS")

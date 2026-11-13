@@ -36,6 +36,10 @@ async def sub_open(ctx: Context) -> None:
         lines.append("Subbing out a teammate needs the other captain to agree.")
     if options.game_on:
         lines.append("**The game is on:** leaving now gives you a queue cooldown.")
+    elif options.dodge:
+        lines.append(
+            "**Subbing yourself out now is a dodge:** it adds strikes and a queue cooldown."
+        )
     box: Container[Any] = Container(TextDisplay("\n".join(lines)))
     buttons = [
         RouteButton(
