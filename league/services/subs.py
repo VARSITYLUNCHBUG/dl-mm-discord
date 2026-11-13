@@ -113,6 +113,7 @@ class SubOutChoice:
 class SubOutOptions:
     choices: list[SubOutChoice]
     game_on: bool
+    dodge: bool = False  # Taking yourself out now counts as a dodge.
 
 
 def sub_out_options(match_id: int, player: Player) -> SubOutOptions:
@@ -137,7 +138,8 @@ def sub_out_options(match_id: int, player: Player) -> SubOutOptions:
                 choices.append(SubOutChoice(other.player_id, other.player.display_name, False))
     if not choices:
         raise InvalidAction("You've already asked for a sub.")
-    return SubOutOptions(choices, _game_on(match))
+    dodge = not _game_on(match) and match.status != Status.READY_CHECK
+    return SubOutOptions(choices, _game_on(match), dodge)
 
 
 @transaction.atomic
@@ -397,14 +399,14 @@ def _fill(match: Match, request: SubRequest, in_player: Player) -> None:
     leaving = match.participants.select_related("player").get(
         player_id=request.leaving_id, is_active=True
     )
-    game_on = _game_on(match)
+    kind = _offence(match, request)
     request.filled_by = in_player
     _resolve(request, SubStatus.FILLED)
     _withdraw_offers(request)
     # Accepting means they're here, so they count as ready.
     lobby.swap_player(match, leaving, in_player, ready=True)
-    if game_on:
-        _penalise(match, leaving.player)
+    if kind:
+        _penalise(match, leaving.player, kind)
     user_ids = {in_player.discord_user_id}
     user_ids.update(c.player.discord_user_id for c in _captains(match))
     _ping(
@@ -416,14 +418,25 @@ def _fill(match: Match, request: SubRequest, in_player: Player) -> None:
     logger.info("Sub filled", extra={"match": match.pk, "request": request.pk})
 
 
-def _penalise(match: Match, player: Player) -> None:
-    penalties.issue(
-        match.community,
-        player,
-        PenaltyKind.LEAVER,
-        match=match,
-        reason=f"Subbed out of match #{match.pk} after the game started",
-    )
+def _offence(match: Match, request: SubRequest) -> str:
+    """What leaving costs. Once the game is on it's leaving a game. Taking yourself out after the
+    ready check but before the game is a dodge. During the ready check, or when a captain asked
+    for it, nothing."""
+    if _game_on(match):
+        return PenaltyKind.LEAVER
+    if request.is_self and match.status != Status.READY_CHECK:
+        return PenaltyKind.DODGE
+    return ""
+
+
+def _penalise(match: Match, player: Player, kind: str) -> None:
+    if kind == PenaltyKind.LEAVER:
+        match.participants.filter(player=player).update(left_early=True)
+    reasons: dict[str, str] = {
+        PenaltyKind.LEAVER: f"Subbed out of match #{match.pk} after the game started",
+        PenaltyKind.DODGE: f"Subbed themself out of match #{match.pk} before the game",
+    }
+    penalties.issue(match.community, player, kind, match=match, reason=reasons.get(kind, ""))
 
 
 @transaction.atomic
@@ -537,8 +550,9 @@ def _expire_request(request_id: int, moment: datetime) -> bool:
             return True
         _withdraw_offers(request)
         _resolve(request, SubStatus.EXPIRED)
-        if _game_on(match):
-            _penalise(match, request.leaving)
+        kind = _offence(match, request)
+        if kind:
+            _penalise(match, request.leaving, kind)
         leaving = set(
             match.sub_requests.filter(status__in=UNRESOLVED).values_list("leaving_id", flat=True)
         )

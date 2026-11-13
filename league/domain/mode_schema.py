@@ -30,10 +30,15 @@ class ReadyCheck(_Strict):
 
 
 class Captains(_Strict):
-    """Once everyone is ready, players vote for up to two captains. Elo fills any gaps, and the
-    lower-rated captain makes the first player pick."""
+    """Once everyone is ready, players vote for up to two captains. Only players with
+    `min_games` completed matches can be voted in, so a newcomer can't be troll-picked. Rating
+    breaks ties and fills any gap, and the lower-rated captain makes the first player pick."""
 
     vote_seconds: Seconds = 45
+    # Completed matches in this server, across seasons, before a player can captain.
+    min_games: Annotated[int, Field(ge=0, le=500)] = 5
+    # A player carrying this many dodge strikes can't captain. None turns the check off.
+    max_strikes: Annotated[int, Field(ge=1, le=100)] | None = 3
 
 
 class PlayerDraft(_Strict):
@@ -67,6 +72,11 @@ class Results(_Strict):
     confirm_window_seconds: Seconds = 300
     reminder_minutes: Annotated[int, Field(ge=1, le=600)] = 45
     staff_escalation_minutes: Annotated[int, Field(ge=1, le=1440)] = 180
+    # Someone leaving in the game's first minutes voids it, once the other captain agrees.
+    early_leave_minutes: Annotated[int, Field(ge=1, le=30)] = 5
+    # How long after the lobby code a captain can still report it. Allows for joining and loading.
+    early_leave_report_minutes: Annotated[int, Field(ge=1, le=120)] = 20
+    early_leave_answer_seconds: Seconds = 120
 
 
 class Subs(_Strict):

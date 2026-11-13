@@ -39,8 +39,7 @@ def join(community_id: int, player: Player) -> QueueStatus:
         raise InvalidAction(f"You're already in match #{live.match_id}.")
     penalty = penalties.active_penalty(community, player)
     if penalty is not None:
-        timestamp = int(penalty.expires_at.timestamp())
-        raise InvalidAction(f"You're on a queue cooldown until <t:{timestamp}:t>.")
+        raise InvalidAction(penalties.refusal_text(community, player, penalty))
     _entry, created = QueueEntry.objects.get_or_create(
         community=community, player=player, defaults={"joined_at": now()}
     )

@@ -74,6 +74,8 @@ class CaptainCandidate:
     player_id: int
     rating: int
     games: int
+    eligible: bool = True  # Meets the mode's captain rule, or staff allowed them.
+    experience: int = 0  # Completed matches in this server, across seasons.
 
 
 def tally_captain_votes(
@@ -81,18 +83,22 @@ def tally_captain_votes(
 ) -> tuple[int, int]:
     """Return (team A captain, team B captain) from a captain vote.
 
-    Most votes first; ties go to higher rating, then more games, then a seeded shuffle. A player
-    with no votes ranks on rating alone, so a short vote is filled by Elo.
+    Eligible players come first. Among them, most votes first; ties go to higher rating, then
+    more games, then a seeded shuffle, so a short vote is filled by rating. If fewer than two are
+    eligible, the rest are filled by the most completed matches, then rating.
     """
     if len(candidates) < 2:
         raise ValueError("Need at least two candidates.")
     rng = seeded_rng(seed, "captain-vote")
     ordered_input = sorted(candidates, key=lambda c: c.player_id)
     tiebreak = {c.player_id: rng.random() for c in ordered_input}
-    ranked = sorted(
-        ordered_input,
-        key=lambda c: (-votes.get(c.player_id, 0), -c.rating, -c.games, tiebreak[c.player_id]),
-    )
+
+    def key(c: CaptainCandidate) -> tuple[bool, int, int, int, int, float]:
+        votes_for = votes.get(c.player_id, 0) if c.eligible else 0
+        experience = 0 if c.eligible else c.experience
+        return (not c.eligible, -votes_for, -experience, -c.rating, -c.games, tiebreak[c.player_id])
+
+    ranked = sorted(ordered_input, key=key)
     return ranked[0].player_id, ranked[1].player_id
 
 

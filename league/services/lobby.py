@@ -32,7 +32,7 @@ from league.models import (
 )
 from league.models.matches import RemovedReason, Source
 from league.models.moderation import PenaltyKind
-from league.services import penalties
+from league.services import penalties, standing
 from league.services.common import (
     active_participants,
     add_effect,
@@ -52,6 +52,7 @@ from league.services.common import (
     require_participant,
     save_transition,
     seconds_from_now,
+    strength_of,
     transition,
 )
 
@@ -198,20 +199,39 @@ def on_ready_timeout(match: Match) -> None:
 VOTES_PER_PLAYER = 2
 
 
+def _eligibility(match: Match, player_ids: Collection[int]) -> dict[int, standing.PlayerStanding]:
+    return standing.eligibility(match.community, mode_of(match), player_ids)
+
+
 def begin_captain_phase(match: Match) -> None:
-    """Everyone is ready: open the captain vote."""
+    """Everyone is ready: open the captain vote. With two or fewer players able to captain, there
+    is nothing to vote on, so they are appointed straight away."""
+    mode = mode_of(match)
     transition(
         match,
         Status.CAPTAIN_PHASE,
         source=Source.SYSTEM,
-        deadline_at=seconds_from_now(mode_of(match).captains.vote_seconds),
+        deadline_at=seconds_from_now(mode.captains.vote_seconds),
     )
     save_transition(match)
-    ids = [p.player.discord_user_id for p in active_participants(match)]
+    active = list(active_participants(match))
+    allowed = _eligibility(match, [p.player_id for p in active])
+    if sum(row.eligibility.ok for row in allowed.values()) <= 2:
+        _close_vote(match, Source.SYSTEM)
+        return
+    ids = [p.player.discord_user_id for p in active]
+    note = (
+        f" Only players with {mode.captains.min_games} completed matches can captain."
+        if mode.captains.min_games
+        else ""
+    )
     add_effect(
         match.community,
         "ping",
-        {"user_ids": ids, "text": "everyone's ready. Vote for up to two captains on the board."},
+        {
+            "user_ids": ids,
+            "text": f"everyone's ready. Vote for up to two captains on the board.{note}",
+        },
         match=match,
     )
     render_board(match)
@@ -233,6 +253,10 @@ def cast_captain_votes(match_id: int, player: Player, candidate_ids: Sequence[in
     candidates = {p.player_id: p.player for p in active_participants(match)}
     if any(candidate_id not in candidates for candidate_id in chosen):
         raise InvalidAction("You can only vote for players in this lobby.")
+    for candidate_id, row in _eligibility(match, chosen).items():
+        if not row.eligibility.ok:
+            name = candidates[candidate_id].display_name
+            raise InvalidAction(f"{name} can't captain yet ({row.eligibility.reason}).")
     match.captain_votes.filter(voter=player).delete()
     moment = now()
     CaptainVote.objects.bulk_create(
@@ -258,7 +282,7 @@ def advance_captain_phase(match: Match) -> None:
 
 
 def on_captain_timeout(match: Match) -> None:
-    """Count the votes cast so far. Elo fills any gap."""
+    """Count the votes cast so far. Rating fills any gap."""
     _close_vote(match, Source.TIMEOUT)
 
 
@@ -273,12 +297,23 @@ def vote_counts(match: Match) -> dict[int, int]:
 
 def _close_vote(match: Match, source: str) -> None:
     participants = list(active_participants(match))
+    allowed = _eligibility(match, [p.player_id for p in participants])
     candidates = []
     for participant in participants:
-        rating, games = rating_of(match.season, participant.player_id)
-        candidates.append(CaptainCandidate(participant.player_id, rating, games))
+        _rating, games = rating_of(match.season, participant.player_id)
+        row = allowed[participant.player_id]
+        candidates.append(
+            CaptainCandidate(
+                participant.player_id,
+                strength_of(match.season, participant.player_id),
+                games,
+                eligible=row.eligibility.ok,
+                experience=row.eligibility.games,
+            )
+        )
     counts = vote_counts(match)
     captain_a, captain_b = tally_captain_votes(counts, candidates, match.rng_seed)
+    eligible_count = sum(c.eligible for c in candidates)
     names = {}
     for participant in participants:
         if participant.player_id in {captain_a, captain_b}:
@@ -291,14 +326,21 @@ def _close_vote(match: Match, source: str) -> None:
         count = counts.get(player_id, 0)
         return f"**{names[player_id]}** ({count} vote{'' if count == 1 else 's'})"
 
+    a, b = names[captain_a], names[captain_b]
+    if eligible_count >= 3:
+        text = f"Captains voted in: {tally(captain_a)} and {tally(captain_b)}."
+    elif eligible_count == 2:
+        text = f"Captains: **{a}** and **{b}**, the only two here who can captain."
+    elif eligible_count == 1:
+        text = (
+            f"Captains: **{a}**, the only one here who can captain, and **{b}**, "
+            "the most experienced of the rest."
+        )
+    else:
+        text = f"Nobody here can captain yet, so the most experienced do: **{a}** and **{b}**."
     begin_player_draft(match, source=source)
     # After the transition, which clears earlier notices, so this one stays up.
-    add_effect(
-        match.community,
-        "ping_lobby",
-        {"text": f"Captains voted in: {tally(captain_a)} and {tally(captain_b)}."},
-        match=match,
-    )
+    add_effect(match.community, "ping_lobby", {"text": text}, match=match)
 
 
 def _ping_captains(match: Match, text: str) -> None:
@@ -308,8 +350,8 @@ def _ping_captains(match: Match, text: str) -> None:
 
 def begin_player_draft(match: Match, source: str) -> None:
     mode = mode_of(match)
-    rating_a, _ = rating_of(match.season, captain_of(match, "A").player_id)
-    rating_b, _ = rating_of(match.season, captain_of(match, "B").player_id)
+    rating_a = strength_of(match.season, captain_of(match, "A").player_id)
+    rating_b = strength_of(match.season, captain_of(match, "B").player_id)
     match.player_first_pick = first_pick_team(rating_a, rating_b, match.rng_seed)
     match.step_index = 0
     transition(
@@ -405,6 +447,32 @@ def check_sub_is_free(match: Match, in_player: Player) -> None:
         raise InvalidAction(f"{in_player.display_name} was already part of this match.")
 
 
+def _captaincy_heir(
+    match: Match, leaving: MatchParticipant, in_player: Player
+) -> MatchParticipant | None:
+    """Who takes over from a captain subbing out, when their sub can't captain. The eligible
+    teammate with the most completed matches, then rating. None means the sub takes it: either
+    they can captain, or nobody else on the team can."""
+    teammates = list(
+        active_participants(match)
+        .filter(team=leaving.team, is_captain=False)
+        .exclude(pk=leaving.pk)
+        .select_related("player")
+    )
+    allowed = _eligibility(match, [in_player.pk, *(p.player_id for p in teammates)])
+    if allowed[in_player.pk].eligibility.ok:
+        return None
+    able = [p for p in teammates if allowed[p.player_id].eligibility.ok]
+    if not able:
+        return None
+
+    def rank(participant: MatchParticipant) -> tuple[int, int, int]:
+        strength = strength_of(match.season, participant.player_id)
+        return (-allowed[participant.player_id].eligibility.games, -strength, participant.player_id)
+
+    return min(able, key=rank)
+
+
 def swap_player(match: Match, leaving: MatchParticipant, in_player: Player, *, ready: bool) -> None:
     """Put the substitute in the leaving player's place: team, role, draft slot and the result.
 
@@ -413,13 +481,14 @@ def swap_player(match: Match, leaving: MatchParticipant, in_player: Player, *, r
     moment = now()
     community = lock_community(match.community_id)
     QueueEntry.objects.filter(community=community, player=in_player).delete()
+    heir = _captaincy_heir(match, leaving, in_player) if leaving.is_captain else None
     MatchParticipant.objects.create(
         match=match,
         player=in_player,
         queue_joined_at=leaving.queue_joined_at,
         ready_at=moment if ready else None,
         team=leaving.team,
-        is_captain=leaving.is_captain,
+        is_captain=leaving.is_captain and heir is None,
         draft_pick_number=leaving.draft_pick_number,
     )
     leaving.is_active = False
@@ -427,6 +496,20 @@ def swap_player(match: Match, leaving: MatchParticipant, in_player: Player, *, r
     leaving.removed_reason = RemovedReason.SUBBED_OUT
     leaving.removed_at = moment
     leaving.save(update_fields=["is_active", "is_captain", "removed_reason", "removed_at"])
+    if heir is not None:
+        heir.is_captain = True
+        heir.save(update_fields=["is_captain"])
+        teammates = active_participants(match).filter(team=heir.team).select_related("player")
+        add_effect(
+            community,
+            "ping",
+            {
+                "user_ids": [p.player.discord_user_id for p in teammates],
+                "text": f"**{heir.player.display_name}** is your captain now: "
+                f"{in_player.display_name} can't captain yet.",
+            },
+            match=match,
+        )
     # Their votes, and votes for them, no longer count. The sub gets a vote of their own.
     match.captain_votes.filter(
         Q(voter_id=leaving.player_id) | Q(candidate_id=leaving.player_id)

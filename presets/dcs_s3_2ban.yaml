@@ -9,7 +9,7 @@ provenance:
   night_shift_status: not_night_shift
 team_size: 6
 ready_check: { seconds: 180, backfill: next_in_queue }
-captains: { vote_seconds: 45 }
+captains: { vote_seconds: 45, min_games: 5, max_strikes: 3 }
 player_draft: { order: FSSFFSSFFS, seconds: 45, on_timeout: auto_highest_rating }
 champion_draft:
   side_seconds: 20
