@@ -12,9 +12,8 @@ class Season(models.Model):
     )
     number = models.PositiveIntegerField()
     name = models.CharField(max_length=100)
-    start_rating = models.IntegerField(default=1000)
-    k_factor = models.PositiveSmallIntegerField(default=32)
-    algo_version = models.CharField(max_length=16, default="elo_v1")
+    # OpenSkill parameters, over `openskill_v1.DEFAULT_PARAMS`. Fixed once the season rates.
+    rating_params = models.JSONField(default=dict, blank=True)
     leaderboard_min_games = models.PositiveSmallIntegerField(default=10)
     started_at = models.DateTimeField()
     ended_at = models.DateTimeField(null=True, blank=True)
@@ -34,13 +33,22 @@ class Season(models.Model):
     def __str__(self) -> str:
         return self.name
 
+    @property
+    def start_rating(self) -> int:
+        """The shown rating of a player who hasn't played: the projection's starting point."""
+        from league.domain.openskill_v1 import OpenSkillAlgo, merged_params
+
+        return OpenSkillAlgo().initial(merged_params(self.rating_params)).rating
+
 
 class PlayerRating(models.Model):
-    """The current Elo. A projection: `rebuild_ratings` can recreate it from the ledger."""
+    """The current rating. A projection: `rebuild_ratings` can recreate it from the ledger."""
 
     season = models.ForeignKey(Season, on_delete=models.PROTECT, related_name="ratings")
     player = models.ForeignKey("league.Player", on_delete=models.PROTECT, related_name="ratings")
-    rating = models.IntegerField()
+    rating = models.IntegerField()  # Shown: max(0, mu - 3 sigma), scaled.
+    mu = models.DecimalField(max_digits=12, decimal_places=6)  # The skill estimate.
+    sigma = models.DecimalField(max_digits=12, decimal_places=6)  # Its uncertainty.
     games = models.PositiveIntegerField(default=0)
     wins = models.PositiveIntegerField(default=0)
     losses = models.PositiveIntegerField(default=0)
@@ -92,7 +100,10 @@ class RatingRun(models.Model):
 
 
 class RatingEvent(models.Model):
-    """The append-only ledger. A player's Elo history is this table, in order."""
+    """The append-only ledger. A player's rating history is this table, in order.
+
+    Deltas are exact decimals, so the start plus the sum of a player's deltas is the projection.
+    """
 
     run = models.ForeignKey(RatingRun, on_delete=models.PROTECT, related_name="events")
     season = models.ForeignKey(Season, on_delete=models.PROTECT, related_name="+")
@@ -106,12 +117,18 @@ class RatingEvent(models.Model):
         on_delete=models.PROTECT,
         related_name="rating_events",
     )
-    delta = models.IntegerField()
+    delta = models.IntegerField()  # In the shown rating.
     rating_after = models.IntegerField()
     expected = models.FloatField(null=True, blank=True)
-    k = models.PositiveSmallIntegerField(null=True, blank=True)
     team_avg = models.FloatField(null=True, blank=True)
     opp_avg = models.FloatField(null=True, blank=True)
+    mu_delta = models.DecimalField(max_digits=12, decimal_places=6)
+    sigma_delta = models.DecimalField(max_digits=12, decimal_places=6)
+    mu_after = models.DecimalField(max_digits=12, decimal_places=6)
+    sigma_after = models.DecimalField(max_digits=12, decimal_places=6)
+    # The MVP or key-player share of mu_delta, zero-sum within the team.
+    award_adj = models.DecimalField(max_digits=12, decimal_places=6, null=True, blank=True)
+    cap_applied = models.BooleanField(default=False)
     created_at = models.DateTimeField()
 
     class Meta:

@@ -53,6 +53,12 @@ class Match(models.Model):
         "league.Player", null=True, blank=True, on_delete=models.PROTECT, related_name="+"
     )
     lobby_code_attempts = models.PositiveSmallIntegerField(default=0)
+    # A lobby deadlock-api created for us. Its bot hosts it, and leaves 15 minutes after creating.
+    api_party_id = models.CharField(max_length=32, blank=True)
+    api_lobby_created_at = models.DateTimeField(null=True, blank=True)
+    api_started_at = models.DateTimeField(null=True, blank=True)
+    # Deadlock's own match ID, from the API lobby, a report or the scoreboard.
+    deadlock_match_id = models.BigIntegerField(null=True, blank=True)
     winner = models.CharField(max_length=1, choices=Team.choices, blank=True)
     # While a sub slot is open the timer stops: this holds what was left, and deadline_at is null.
     held_seconds = models.PositiveIntegerField(null=True, blank=True)
@@ -97,6 +103,9 @@ class MatchParticipant(models.Model):
     # Blank means the player is on the roster. Rated rosters are `team` set and this blank.
     removed_reason = models.CharField(max_length=16, choices=RemovedReason.choices, blank=True)
     removed_at = models.DateTimeField(null=True, blank=True)
+    # Left the game while it was on: subbed out, voided as an early leaver, or abandoned per
+    # deadlock-api.
+    left_early = models.BooleanField(default=False)
 
     class Meta:
         db_table = "match_participants"
@@ -250,3 +259,49 @@ class CaptainVote(models.Model):
 
     def __str__(self) -> str:
         return f"{self.voter_id} -> {self.candidate_id}"
+
+
+class EarlyLeaveStatus(models.TextChoices):
+    PENDING = "pending", "Waiting for the other captain"
+    APPROVED = "approved", "Match voided"
+    REJECTED = "rejected", "The other captain disagreed"
+    EXPIRED = "expired", "No answer, sent to staff"
+
+
+class EarlyLeave(models.Model):
+    """A captain saying someone left in the first minutes of the game. Agreed, the match is voided
+    with no rating change and the leaver gets a leaver penalty."""
+
+    match = models.ForeignKey(Match, on_delete=models.PROTECT, related_name="early_leaves")
+    leaver = models.ForeignKey("league.Player", on_delete=models.PROTECT, related_name="+")
+    requested_by = models.ForeignKey("league.Player", on_delete=models.PROTECT, related_name="+")
+    status = models.CharField(
+        max_length=8, choices=EarlyLeaveStatus.choices, default=EarlyLeaveStatus.PENDING
+    )
+    deadline_at = models.DateTimeField()
+    resolved_by = models.ForeignKey(
+        "league.Player", null=True, blank=True, on_delete=models.PROTECT, related_name="+"
+    )
+    resolved_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField()
+
+    class Meta:
+        db_table = "early_leaves"
+        ordering = ("id",)
+        constraints = [
+            models.UniqueConstraint(
+                fields=("match",),
+                condition=Q(status="pending"),
+                name="uniq_pending_early_leave",
+            ),
+        ]
+        indexes = [
+            models.Index(
+                fields=("deadline_at",),
+                condition=Q(status="pending"),
+                name="early_leave_pending_idx",
+            )
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.match_id}: {self.leaver_id} {self.status}"
